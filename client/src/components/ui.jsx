@@ -1,0 +1,101 @@
+import { useEffect, useRef, useState } from 'react';
+import { AlertCircle, CheckCircle2 } from 'lucide-react';
+
+export function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal" role="dialog" aria-modal="true">
+        <h2>{title}</h2>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function Alert({ kind = 'error', children }) {
+  if (!children) return null;
+  const Icon = kind === 'error' ? AlertCircle : CheckCircle2;
+  return <div className={`alert ${kind}`}><Icon />{children}</div>;
+}
+
+export function Field({ label, children }) {
+  return <div className="field"><label>{label}</label>{children}</div>;
+}
+
+// Counts up from 0 once, when scrolled into view
+export function CountUp({ value, duration = 1800 }) {
+  const ref = useRef(null);
+  const [shown, setShown] = useState(0);
+  const done = useRef(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { setShown(value); return; }
+    const io = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting || done.current) return;
+      done.current = true;
+      io.disconnect();
+      const start = performance.now();
+      const tick = (now) => {
+        const p = Math.min((now - start) / duration, 1);
+        setShown(Math.round(value * (1 - Math.pow(1 - p, 3))));
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, { threshold: 0.1 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [value, duration]);
+  return <span ref={ref}>{shown.toLocaleString('en-IN')}</span>;
+}
+
+export const fmtDate = (s) => (s ? new Date(s.replace(' ', 'T')).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+
+export const inr = (n) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
+
+// Horizontal bars, scaled to the largest value.
+export function BarList({ rows, format = inr, color = '' }) {
+  if (!rows?.length) return <p>No data yet.</p>;
+  const max = Math.max(...rows.map((r) => r.value), 1);
+  return (
+    <div className="bars">
+      {rows.map((r) => (
+        <div className="bar-row" key={r.label} title={r.label}>
+          <span className="name">{r.label}</span>
+          <div className="bar-track"><div className={`bar-fill ${color}`} style={{ width: `${Math.max((r.value / max) * 100, 2)}%` }} /></div>
+          <span className="val">{format(r.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Paired monthly columns: purchases (green) next to issued (blue).
+export function Trend({ rows }) {
+  const max = Math.max(...rows.flatMap((r) => [r.issued, r.purchases]), 1);
+  const h = (v) => `${Math.max((v / max) * 100, v ? 3 : 0)}%`;
+  return (
+    <>
+      <div className="trend">
+        {rows.map((r) => (
+          <div className="trend-col" key={r.month} title={`${r.label}
+Issued ${inr(r.issued)}
+Purchased ${inr(r.purchases)}`}>
+            <div className="trend-pair">
+              <div className="trend-bar" style={{ height: h(r.issued) }} />
+              <div className="trend-bar green" style={{ height: h(r.purchases) }} />
+            </div>
+            <span className="label">{r.label.slice(0, 3)} {r.month.slice(2, 4)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="legend"><span><i />Issued</span><span><i className="green" />Purchased</span></div>
+    </>
+  );
+}
