@@ -3,9 +3,9 @@ import { Pencil, Plus, Scale, Trash2 } from 'lucide-react';
 import { api } from '../api.js';
 import { Alert, Field, Modal } from '../components/ui.jsx';
 
-const blank = { name: '', sku: '', category_id: '', quantity: 0, min_quantity: 0, location: '', notes: '', unit: '', rate: '', vendor: '' };
+const blank = { name: '', sku: '', category_id: '', quantity: 0, min_quantity: 0, location: '', notes: '', unit: '', rate: '', vendor: '', vendor_email: '' };
 
-export default function Items({ isAdmin }) {
+export default function Items({ isAdmin, canManage }) {
   const [items, setItems] = useState([]);
   const [cats, setCats] = useState([]);
   const [q, setQ] = useState('');
@@ -42,7 +42,7 @@ export default function Items({ isAdmin }) {
     <>
       <div className="page-head reveal">
         <div><span className="label">Inventory</span><h1>Items</h1><p>{items.length} item types tracked.</p></div>
-        {isAdmin && <button className="btn primary" onClick={() => { setError(''); setEdit(blank); }}><Plus /> Add item</button>}
+        {canManage && <button className="btn primary" onClick={() => { setError(''); setEdit(blank); }}><Plus /> Add item</button>}
       </div>
       {!edit && <Alert>{error}</Alert>}
       <div className="toolbar reveal">
@@ -55,7 +55,7 @@ export default function Items({ isAdmin }) {
       <div className="card flush reveal" style={{ '--i': 1 }}>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Item</th><th>SKU</th><th>Category</th><th>Vendor</th><th>Rate</th><th>Qty</th>{isAdmin && <th />}</tr></thead>
+            <thead><tr><th>Item</th><th>SKU</th><th>Category</th><th>Vendor</th><th>Rate</th><th>Qty</th>{canManage && <th />}</tr></thead>
             <tbody>
               {shown.map((i) => (
                 <tr key={i.id}>
@@ -65,10 +65,10 @@ export default function Items({ isAdmin }) {
                   <td>{i.vendor || '—'}</td>
                   <td>{i.rate != null ? `₹${i.rate.toLocaleString('en-IN')}` : '—'}{i.unit ? <span className="label"> / {i.unit}</span> : ''}</td>
                   <td><span className={`badge ${i.quantity === 0 ? 'red' : i.min_quantity > 0 && i.quantity <= i.min_quantity ? '' : 'green'}`}>{i.quantity}{i.min_quantity > 0 && i.quantity <= i.min_quantity ? ' · low' : ''}</span></td>
-                  {isAdmin && <td className="actions">
+                  {canManage && <td className="actions">
                     <button className="btn ghost sm" title="Adjust stock" onClick={() => { setError(''); setAdj({ item: i, delta: '', reason: 'Recount', note: '' }); }}><Scale /></button>
                     <button className="btn ghost sm" title="Edit" onClick={() => { setError(''); setEdit(i); }}><Pencil /></button>
-                    <button className="btn danger sm" onClick={() => remove(i)}><Trash2 /></button>
+                    {isAdmin && <button className="btn danger sm" onClick={() => remove(i)}><Trash2 /></button>}
                   </td>}
                 </tr>
               ))}
@@ -121,6 +121,7 @@ export default function Items({ isAdmin }) {
               <Field label="Rate (₹)"><input type="number" min="0" step="0.01" value={edit.rate ?? ''} onChange={set('rate')} /></Field>
             </div>
             <Field label="Vendor"><input value={edit.vendor || ''} onChange={set('vendor')} /></Field>
+            <Field label="Vendor email (for purchase orders)"><input type="email" value={edit.vendor_email || ''} onChange={set('vendor_email')} /></Field>
             <Field label="Location"><input value={edit.location || ''} onChange={set('location')} /></Field>
             <Field label="Notes"><textarea rows="2" value={edit.notes || ''} onChange={set('notes')} /></Field>
             <div className="modal-actions">

@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { Alert, Field, Modal, fmtDate } from '../components/ui.jsx';
 
 const todayStr = () => new Date().toLocaleDateString('en-CA');
-const blank = () => ({ item_id: '', quantity: 1, rate: '', challan_no: '', vendor: '', purchased_at: todayStr() });
+const blank = () => ({ item_id: '', quantity: 1, rate: '', challan_no: '', vendor: '', purchased_at: todayStr(), payment_method: 'Cash', payment_ref: '' });
 
 export default function Purchases() {
   const [rows, setRows] = useState([]);
@@ -35,12 +35,13 @@ export default function Purchases() {
       <div className="card flush reveal" style={{ '--i': 1 }}>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Date</th><th>Item</th><th>Vendor</th><th>Challan</th><th>Qty</th><th>Rate ₹</th><th>Amount ₹</th></tr></thead>
+            <thead><tr><th>Date</th><th>Item</th><th>Vendor</th><th>Challan</th><th>Qty</th><th>Rate ₹</th><th>Amount ₹</th><th>Payment</th></tr></thead>
             <tbody>
               {rows.map((p) => (
                 <tr key={p.id}>
                   <td>{fmtDate(p.purchased_at)}</td><td><strong>{p.item_name}</strong></td><td>{p.vendor || '—'}</td><td>{p.challan_no || '—'}</td>
                   <td>{p.quantity} {p.unit || ''}</td><td>{p.rate.toLocaleString('en-IN')}</td><td>{(p.quantity * p.rate).toLocaleString('en-IN')}</td>
+                  <td>{p.payment_method || '—'}{p.payment_ref && <div className="label">{p.payment_ref}</div>}</td>
                 </tr>
               ))}
             </tbody>
@@ -67,6 +68,18 @@ export default function Purchases() {
               <Field label="Date"><input type="date" required max={todayStr()} value={form.purchased_at} onChange={set('purchased_at')} /></Field>
             </div>
             <Field label="Vendor"><input value={form.vendor} onChange={set('vendor')} /></Field>
+            <div className="form-row">
+              <Field label="Payment method">
+                <select value={form.payment_method} onChange={set('payment_method')}>
+                  <option>Cash</option><option>Debit card</option><option>Razorpay</option>
+                </select>
+              </Field>
+              {form.payment_method !== 'Cash' && (
+                <Field label={form.payment_method === 'Razorpay' ? 'Razorpay payment ID' : 'Card txn / last 4 digits'}>
+                  <input required={form.payment_method === 'Razorpay'} value={form.payment_ref} onChange={set('payment_ref')} placeholder={form.payment_method === 'Razorpay' ? 'pay_XXXXXXXXXXXXXX' : ''} />
+                </Field>
+              )}
+            </div>
             <p style={{ marginBottom: '1rem' }}>Total: <strong>₹{total.toLocaleString('en-IN')}</strong></p>
             <div className="modal-actions">
               <button type="button" className="btn ghost" onClick={() => setForm(null)}>Cancel</button>

@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-import { db, stamp } from './db.js';
+import { db, tx, stamp } from './db.js';
 
 export const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 export const currentMonth = () => stamp().slice(0, 7);
@@ -15,35 +15,35 @@ export function monthLabel(m) {
   return new Date(y, mo - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 }
 
-export function listMonths() {
-  const rows = db.prepare(`
+export async function listMonths() {
+  const rows = await db.all(`
     SELECT substr(purchased_at,1,7) m FROM purchases UNION SELECT substr(created_at,1,7) FROM adjustments
-    UNION SELECT substr(issued_at,1,7) FROM issues UNION SELECT month FROM closed_months`).all();
+    UNION SELECT substr(issued_at,1,7) FROM issues UNION SELECT month FROM closed_months`);
   const set = new Set(rows.map((r) => r.m).filter(Boolean));
   set.add(currentMonth());
-  const closed = new Map(db.prepare('SELECT * FROM closed_months').all().map((c) => [c.month, c]));
+  const closed = new Map((await db.all('SELECT * FROM closed_months')).map((c) => [c.month, c]));
   return [...set].sort().reverse().map((month) => ({ month, label: monthLabel(month), closed: closed.has(month) }));
 }
 
 // Opening/closing are derived from today's quantity by walking movements backwards, so
 // every stock change must be recorded as a purchase, adjustment, issue or return.
-function liveRows(month) {
+async function liveRows(month) {
   const { start, next } = monthRange(month);
-  const items = db.prepare('SELECT i.*, c.name category FROM items i LEFT JOIN categories c ON c.id=i.category_id WHERE i.created_at < ? ORDER BY i.name').all(`${next} 00:00:00`);
+  const items = await db.all('SELECT i.*, c.name category FROM items i LEFT JOIN categories c ON c.id=i.category_id WHERE i.created_at < ? ORDER BY i.name', [`${next} 00:00:00`]);
   const mv = new Map();
   const get = (id) => { if (!mv.has(id)) mv.set(id, { after: 0, p: 0, pAmt: 0, a: 0, net: 0, challan: new Set() }); return mv.get(id); };
 
-  for (const r of db.prepare('SELECT * FROM purchases').all()) {
+  for (const r of await db.all('SELECT * FROM purchases')) {
     const m = get(r.item_id);
     if (r.purchased_at >= next) m.after += r.quantity;
     else if (r.purchased_at >= start) { m.p += r.quantity; m.pAmt += r.quantity * r.rate; if (r.challan_no) m.challan.add(r.challan_no); }
   }
-  for (const r of db.prepare('SELECT * FROM adjustments').all()) {
+  for (const r of await db.all('SELECT * FROM adjustments')) {
     const m = get(r.item_id);
     if (r.created_at >= next) m.after += r.delta;
     else if (r.created_at >= start) m.a += r.delta;
   }
-  for (const r of db.prepare('SELECT * FROM issues').all()) {
+  for (const r of await db.all('SELECT * FROM issues')) {
     const m = get(r.item_id);
     if (r.issued_at >= next) m.after -= r.quantity;
     else if (r.issued_at >= start) m.net += r.quantity;
@@ -70,9 +70,9 @@ const totals = (rows) => ({
   issued: sum(rows, (r) => r.issuedAmt), closing: sum(rows, (r) => r.closingAmt),
 });
 
-export function buildReport(month) {
-  const closed = db.prepare('SELECT * FROM closed_months WHERE month=?').get(month);
-  const raw = closed ? db.prepare('SELECT * FROM month_closings WHERE month=? ORDER BY vendor, category, name').all(month) : liveRows(month);
+export async function buildReport(month) {
+  const closed = await db.get('SELECT * FROM closed_months WHERE month=?', [month]);
+  const raw = closed ? await db.all('SELECT * FROM month_closings WHERE month=? ORDER BY vendor, category, name', [month]) : await liveRows(month);
   const rows = raw.map((r) => ({
     ...r, openingAmt: r.opening * r.rate, issuedAmt: r.issued * r.rate, closingAmt: r.closing * r.rate,
     purchase_rate: r.purchased ? r.purchase_amount / r.purchased : r.rate,
@@ -92,21 +92,20 @@ export function buildReport(month) {
   return { month, label: monthLabel(month), closed: !!closed, closedAt: closed?.closed_at || null, imported: !!closed && closed.closed_by == null, vendors: out, totals: totals(rows) };
 }
 
-export function closeMonth(month, userId) {
-  const rows = liveRows(month);
-  db.exec('BEGIN');
-  try {
-    db.prepare('INSERT INTO closed_months (month,closed_at,closed_by) VALUES (?,?,?)').run(month, stamp(), userId);
-    const ins = db.prepare(`INSERT INTO month_closings (month,item_id,name,vendor,category,unit,rate,opening,challan,purchased,purchase_amount,adjusted,issued,closing)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-    for (const r of rows) ins.run(month, r.item_id, r.name, r.vendor, r.category, r.unit, r.rate, r.opening, r.challan, r.purchased, r.purchase_amount, r.adjusted, r.issued, r.closing);
-    db.exec('COMMIT');
-  } catch (e) { db.exec('ROLLBACK'); throw e; }
+export async function closeMonth(month, userId) {
+  const rows = await liveRows(month);
+  await tx(async (t) => {
+    await t.run('INSERT INTO closed_months (month,closed_at,closed_by) VALUES (?,?,?)', [month, stamp(), userId]);
+    for (const r of rows) {
+      await t.run(`INSERT INTO month_closings (month,item_id,name,vendor,category,unit,rate,opening,challan,purchased,purchase_amount,adjusted,issued,closing)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [month, r.item_id, r.name, r.vendor, r.category, r.unit, r.rate, r.opening, r.challan, r.purchased, r.purchase_amount, r.adjusted, r.issued, r.closing]);
+    }
+  });
   return rows.length;
 }
 
 export async function reportWorkbook(month) {
-  const rep = buildReport(month);
+  const rep = await buildReport(month);
   const wb = new ExcelJS.Workbook();
   const money = '#,##0.00';
   const bold = (row) => { row.font = { bold: true }; };

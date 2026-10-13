@@ -75,7 +75,7 @@ export default function Users({ me }) {
             <Field label="Office"><select value={form.office} onChange={set('office')}>{offices.map((o) => <option key={o} value={o}>{o}</option>)}</select></Field>
             <div className="form-row">
               <Field label="Password"><input type="password" minLength="6" required value={form.password} onChange={set('password')} /></Field>
-              <Field label="Role"><select value={form.role} onChange={set('role')}><option value="staff">Staff</option><option value="admin">Admin</option></select></Field>
+              <Field label="Role"><select value={form.role} onChange={set('role')}><option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option></select></Field>
             </div>
             <div className="modal-actions">
               <button type="button" className="btn ghost" onClick={() => setForm(null)}>Cancel</button>

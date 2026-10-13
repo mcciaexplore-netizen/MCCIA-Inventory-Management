@@ -157,3 +157,11 @@ tbody tr { transition: background var(--ease-sm); } tbody tr:hover { background:
 }
 @media (max-width: 480px) { .grid.cols-4 { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+.logo { display: block; width: auto; object-fit: contain; }
+.po-print table { width: 100%; }
+@media print {
+  body * { visibility: hidden; }
+  .po-print, .po-print * { visibility: visible; }
+  .po-print { position: absolute; left: 0; top: 0; width: 100%; }
+}

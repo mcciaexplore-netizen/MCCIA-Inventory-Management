@@ -4,40 +4,42 @@ import { buildReport, currentMonth, listMonths } from './reports.js';
 // Value is quantity × the item's current rate, the same basis as the register.
 const VALUE = 'COALESCE(i.rate,0) * s.quantity';
 
-export function consumption(month) {
+export async function consumption(month) {
   const where = month && month !== 'all' ? "WHERE substr(s.issued_at,1,7) = ?" : '';
   const args = where ? [month] : [];
-  const q = (sql) => db.prepare(sql).all(...args);
-  return {
-    byEvent: q(`SELECT COALESCE(NULLIF(TRIM(s.event),''),'(no event)') label, SUM(${VALUE}) value, SUM(s.quantity) qty, COUNT(*) entries
+  const q = (sql) => db.all(sql, args);
+  const [byEvent, byPerson, topItems] = await Promise.all([
+    q(`SELECT COALESCE(NULLIF(TRIM(s.event),''),'(no event)') label, SUM(${VALUE}) value, SUM(s.quantity) qty, COUNT(*) entries
       FROM issues s JOIN items i ON i.id=s.item_id ${where} GROUP BY label ORDER BY value DESC LIMIT 10`),
-    byPerson: q(`SELECT s.issued_to label, SUM(${VALUE}) value, SUM(s.quantity) qty, COUNT(*) entries
+    q(`SELECT s.issued_to label, SUM(${VALUE}) value, SUM(s.quantity) qty, COUNT(*) entries
       FROM issues s JOIN items i ON i.id=s.item_id ${where} GROUP BY label ORDER BY value DESC LIMIT 10`),
-    topItems: q(`SELECT i.name label, i.unit, SUM(s.quantity) qty, SUM(${VALUE}) value
+    q(`SELECT i.name label, i.unit, SUM(s.quantity) qty, SUM(${VALUE}) value
       FROM issues s JOIN items i ON i.id=s.item_id ${where} GROUP BY i.id ORDER BY value DESC, qty DESC LIMIT 10`),
-  };
+  ]);
+  return { byEvent, byPerson, topItems };
 }
 
 // Monthly totals come from the register itself, so they match the sheets (not just logged entries).
-export function trend(limit = 12) {
-  return listMonths().slice(0, limit).reverse().map(({ month, label }) => {
-    const t = buildReport(month).totals;
+export async function trend(limit = 12) {
+  const months = (await listMonths()).slice(0, limit).reverse();
+  return Promise.all(months.map(async ({ month, label }) => {
+    const t = (await buildReport(month)).totals;
     return { month, label, issued: Math.round(t.issued), purchases: Math.round(t.purchase) };
-  });
+  }));
 }
 
 // Average monthly use comes from up to the last 3 closed months (or the open month if none are closed yet).
-export function reorder() {
-  const months = listMonths();
+export async function reorder() {
+  const months = await listMonths();
   let use = months.filter((m) => m.closed).slice(0, 3);
   if (!use.length) use = months.filter((m) => m.month === currentMonth());
   const issued = new Map();
   for (const m of use) {
-    for (const v of buildReport(m.month).vendors) for (const s of v.sections) for (const r of s.rows) {
+    for (const v of (await buildReport(m.month)).vendors) for (const s of v.sections) for (const r of s.rows) {
       if (r.item_id != null) issued.set(r.item_id, (issued.get(r.item_id) || 0) + r.issued);
     }
   }
-  const items = db.prepare('SELECT i.*, c.name category FROM items i LEFT JOIN categories c ON c.id=i.category_id').all();
+  const items = await db.all('SELECT i.*, c.name category FROM items i LEFT JOIN categories c ON c.id=i.category_id');
   const out = [];
   for (const i of items) {
     const avg = (issued.get(i.id) || 0) / use.length;

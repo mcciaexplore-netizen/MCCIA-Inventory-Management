@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { BarChart3, LineChart, Boxes, ClipboardList, FolderTree, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, UserCog, Users as UsersIcon, X } from 'lucide-react';
+import { BarChart3, LineChart, ClipboardList, FileText, FolderTree, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, UserCog, Users as UsersIcon, X } from 'lucide-react';
 import { api, getToken, setToken } from './api.js';
+import PurchaseOrders from "./pages/PurchaseOrders.jsx";
+import Requests from "./pages/Requests.jsx";
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Items from './pages/Items.jsx';
@@ -30,23 +32,26 @@ export default function App() {
   if (!user) return <Login onLogin={setUser} />;
 
   const isAdmin = user.role === 'admin';
+  const canManage = isAdmin || user.role === 'manager';
   const logout = async () => { await api.post('/api/logout').catch(() => {}); setToken(null); setUser(null); };
 
   return (
     <div className="shell">
       <div className="glow" />
       <div className="topbar">
-        <div className="brand" style={{ padding: 0 }}><Boxes size={22} /> MCCIA Inventory</div>
+        <div className="brand" style={{ padding: 0 }}><img src="/logo.png" alt="MCCIA" className="logo" style={{ height: 34 }} /></div>
         <button className="btn ghost sm" onClick={() => setOpen(!open)} aria-label="Menu">{open ? <X /> : <Menu />}</button>
       </div>
       <aside className={`sidebar ${open ? 'open' : ''}`}>
-        <div className="brand"><Boxes size={24} /> MCCIA Inventory</div>
+        <div className="brand"><img src="/logo.png" alt="MCCIA" className="logo" style={{ height: 44 }} /></div>
         <nav className="nav">
           <NavLink to="/" end><LayoutDashboard /> Dashboard</NavLink>
           <NavLink to="/items"><Package /> Items</NavLink>
-          <NavLink to="/entry"><ClipboardList /> Daily Entry</NavLink>
-          <NavLink to="/issues"><HandHelping /> Issue / Return</NavLink>
-          {isAdmin && <NavLink to="/purchases"><PackagePlus /> Purchases</NavLink>}
+          {canManage && <NavLink to="/entry"><ClipboardList /> Daily Entry</NavLink>}
+          {canManage && <NavLink to="/issues"><HandHelping /> Issue / Return</NavLink>}
+          <NavLink to="/requests"><HandHelping /> {canManage ? "Requests" : "My Requests"}</NavLink>
+          {canManage && <NavLink to="/purchases"><PackagePlus /> Purchases</NavLink>}
+          {canManage && <NavLink to="/orders"><FileText /> Purchase Orders</NavLink>}
           <NavLink to="/reports"><BarChart3 /> Monthly Report</NavLink>
           <NavLink to="/insights"><LineChart /> Insights</NavLink>
           {isAdmin && <NavLink to="/categories"><FolderTree /> Categories</NavLink>}
@@ -62,12 +67,14 @@ export default function App() {
       <main className="main" key={loc.pathname}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/items" element={<Items isAdmin={isAdmin} />} />
-          <Route path="/issues" element={<Issues />} />
-          <Route path="/entry" element={<Entry />} />
+          <Route path="/items" element={<Items isAdmin={isAdmin} canManage={canManage} />} />
+          <Route path="/issues" element={canManage ? <Issues /> : <Navigate to="/" />} />
+          <Route path="/orders" element={canManage ? <PurchaseOrders /> : <Navigate to="/" />} />
+          <Route path="/requests" element={<Requests canManage={canManage} />} />
+          <Route path="/entry" element={canManage ? <Entry /> : <Navigate to="/" />} />
           <Route path="/insights" element={<Insights />} />
-          <Route path="/reports" element={<Reports isAdmin={isAdmin} />} />
-          <Route path="/purchases" element={isAdmin ? <Purchases /> : <Navigate to="/" />} />
+          <Route path="/reports" element={<Reports isAdmin={canManage} />} />
+          <Route path="/purchases" element={canManage ? <Purchases /> : <Navigate to="/" />} />
           <Route path="/audit" element={isAdmin ? <Audit /> : <Navigate to="/" />} />
           <Route path="/account" element={<Account user={user} />} />
           <Route path="/categories" element={isAdmin ? <Categories /> : <Navigate to="/" />} />

@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { Boxes } from 'lucide-react';
 import { api, setToken } from '../api.js';
 import { Alert, Field } from '../components/ui.jsx';
 
@@ -25,7 +24,7 @@ export default function Login({ onLogin }) {
     <div className="login-page">
       <div className="glow" />
       <form className="card login-card reveal" onSubmit={submit}>
-        <div className="brand"><Boxes size={26} /> MCCIA Inventory</div>
+        <div className="brand"><img src="/logo.png" alt="MCCIA" className="logo" style={{ height: 52 }} /></div>
         <h2 style={{ marginBottom: '0.4rem' }}>Welcome back</h2>
         <p style={{ marginBottom: '1.5rem' }}>Sign in to manage internal inventory.</p>
         <Alert>{error}</Alert>
