@@ -1,21 +1,21 @@
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { BarChart3, LineChart, ClipboardList, FileText, FolderTree, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, UserCog, Users as UsersIcon, X } from 'lucide-react';
 import { api, getToken, setToken } from './api.js';
-import PurchaseOrders from "./pages/PurchaseOrders.jsx";
-import Requests from "./pages/Requests.jsx";
+const PurchaseOrders = lazy(() => import('./pages/PurchaseOrders.jsx'));
+const Requests = lazy(() => import('./pages/Requests.jsx'));
 import Login from './pages/Login.jsx';
-import Dashboard from './pages/Dashboard.jsx';
-import Items from './pages/Items.jsx';
-import Categories from './pages/Categories.jsx';
-import Issues from './pages/Issues.jsx';
-import Users from './pages/Users.jsx';
-import Reports from './pages/Reports.jsx';
-import Purchases from './pages/Purchases.jsx';
-import Entry from './pages/Entry.jsx';
-import Audit from './pages/Audit.jsx';
-import Account from './pages/Account.jsx';
-import Insights from './pages/Insights.jsx';
+const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
+const Items = lazy(() => import('./pages/Items.jsx'));
+const Categories = lazy(() => import('./pages/Categories.jsx'));
+const Issues = lazy(() => import('./pages/Issues.jsx'));
+const Users = lazy(() => import('./pages/Users.jsx'));
+const Reports = lazy(() => import('./pages/Reports.jsx'));
+const Purchases = lazy(() => import('./pages/Purchases.jsx'));
+const Entry = lazy(() => import('./pages/Entry.jsx'));
+const Audit = lazy(() => import('./pages/Audit.jsx'));
+const Account = lazy(() => import('./pages/Account.jsx'));
+const Insights = lazy(() => import('./pages/Insights.jsx'));
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -65,6 +65,7 @@ export default function App() {
         <button className="btn ghost" onClick={logout}><LogOut /> Sign out</button>
       </aside>
       <main className="main" key={loc.pathname}>
+        <Suspense fallback={null}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/items" element={<Items isAdmin={isAdmin} canManage={canManage} />} />
@@ -81,6 +82,7 @@ export default function App() {
           <Route path="/users" element={isAdmin ? <Users me={user} /> : <Navigate to="/" />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
+        </Suspense>
       </main>
     </div>
   );
