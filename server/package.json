@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "echo \"no build step\"",
+    "build": "npm install --prefix ../client --include=dev && npm run build --prefix ../client",
     "start": "node index.js",
     "dev": "node --watch index.js"
   },
