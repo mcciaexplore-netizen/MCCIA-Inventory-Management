@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Pencil, Plus, Scale, Trash2 } from 'lucide-react';
+import { Pencil, Plus, Scale, Trash2, Upload } from 'lucide-react';
 import { api } from '../api.js';
 import { Alert, Field, Modal } from '../components/ui.jsx';
+import { FIELDS, buildRows, guessLayout, readGrid } from '../importFile.js';
 
 const blank = { name: '', sku: '', category_id: '', quantity: 0, min_quantity: 0, location: '', notes: '', unit: '', rate: '', vendor: '', vendor_email: '' };
 
@@ -13,6 +14,7 @@ export default function Items({ isAdmin, canManage }) {
   const [edit, setEdit] = useState(null);
   const [adj, setAdj] = useState(null);
   const [error, setError] = useState('');
+  const [imp, setImp] = useState(null);
 
   const load = () => Promise.all([api.get('/api/items'), api.get('/api/categories')]).then(([i, c]) => { setItems(i); setCats(c); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
@@ -36,15 +38,35 @@ export default function Items({ isAdmin, canManage }) {
     e.preventDefault(); setError('');
     try { await api.post(`/api/items/${adj.item.id}/adjust`, { delta: adj.delta, reason: adj.reason, note: adj.note }); setAdj(null); load(); } catch (err) { setError(err.message); }
   }
+  async function pickFile(e) {
+    const file = e.target.files[0]; e.target.value = '';
+    if (!file) return;
+    setError('');
+    try {
+      const grid = await readGrid(file);
+      if (!grid.length) throw new Error('No data found in that file');
+      setImp({ file: file.name, grid, ...guessLayout(grid), result: null });
+    } catch (err) { setError(err.message); }
+  }
+  async function runImport() {
+    setError('');
+    try {
+      const result = await api.post('/api/items/bulk', { rows: buildRows(imp.grid, imp.header, imp.map) });
+      setImp({ ...imp, result }); load();
+    } catch (err) { setError(err.message); }
+  }
   const set = (k) => (e) => setEdit({ ...edit, [k]: e.target.value });
 
   return (
     <>
       <div className="page-head reveal">
         <div><span className="label">Inventory</span><h1>Items</h1><p>{items.length} item types tracked.</p></div>
-        {canManage && <button className="btn primary" onClick={() => { setError(''); setEdit(blank); }}><Plus /> Add item</button>}
+        {canManage && <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <label className="btn ghost" style={{ cursor: 'pointer' }}><Upload /> Import file<input type="file" accept=".xlsx,.xls,.csv,.pdf" hidden onChange={pickFile} /></label>
+          <button className="btn primary" onClick={() => { setError(''); setEdit(blank); }}><Plus /> Add item</button>
+        </div>}
       </div>
-      {!edit && <Alert>{error}</Alert>}
+      {!edit && !imp && <Alert>{error}</Alert>}
       <div className="toolbar reveal">
         <input placeholder="Search name, SKU, vendor or location…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select value={cat} onChange={(e) => setCat(e.target.value)}>
@@ -77,6 +99,54 @@ export default function Items({ isAdmin, canManage }) {
           {shown.length === 0 && <div className="empty">No items found.</div>}
         </div>
       </div>
+      {imp && (() => {
+        const rows = buildRows(imp.grid, imp.header, imp.map);
+        const head = imp.grid[imp.header] || [];
+        return (
+          <Modal title={`Import items: ${imp.file}`} onClose={() => setImp(null)}>
+            <Alert>{error}</Alert>
+            {imp.result ? (
+              <>
+                <Alert kind="success">{`${imp.result.created} item(s) added, ${imp.result.skipped.length} skipped (already exist).`}</Alert>
+                {imp.result.errors.length > 0 && <Alert>{imp.result.errors.slice(0, 8).join(' | ')}</Alert>}
+                <div className="modal-actions"><button className="btn primary" onClick={() => setImp(null)}>Done</button></div>
+              </>
+            ) : (
+              <>
+                <p style={{ marginBottom: '1rem' }}>Match each field to a column in your file. Items whose name already exists are skipped; new categories are created automatically. For PDFs, check the preview carefully.</p>
+                <div className="form-row">
+                  <Field label="Header row">
+                    <select value={imp.header} onChange={(e) => setImp({ ...imp, header: Number(e.target.value) })}>
+                      {imp.grid.slice(0, 15).map((r, i) => <option key={i} value={i}>{i + 1}: {r.filter(Boolean).slice(0, 4).join(', ') || '(empty)'}</option>)}
+                    </select>
+                  </Field>
+                </div>
+                <div className="form-row" style={{ flexWrap: 'wrap' }}>
+                  {FIELDS.map((f) => (
+                    <Field key={f.key} label={f.label + (f.required ? ' *' : '')}>
+                      <select value={imp.map[f.key] ?? ''} onChange={(e) => setImp({ ...imp, map: { ...imp.map, [f.key]: e.target.value === '' ? undefined : Number(e.target.value) } })}>
+                        <option value="">Not in file</option>
+                        {head.map((h, i) => <option key={i} value={i}>{h || `Column ${i + 1}`}</option>)}
+                      </select>
+                    </Field>
+                  ))}
+                </div>
+                <div className="table-wrap" style={{ maxHeight: 220, overflow: 'auto', margin: '1rem 0' }}>
+                  <table>
+                    <thead><tr><th>Name</th><th>Category</th><th>Unit</th><th>Rate</th><th>Qty</th><th>Vendor</th></tr></thead>
+                    <tbody>{rows.slice(0, 10).map((r, i) => <tr key={i}><td>{r.name}</td><td>{r.category || '—'}</td><td>{r.unit || '—'}</td><td>{r.rate || '—'}</td><td>{r.quantity}</td><td>{r.vendor || '—'}</td></tr>)}</tbody>
+                  </table>
+                  {rows.length === 0 && <div className="empty">Choose the Item name column to see a preview.</div>}
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="btn ghost" onClick={() => setImp(null)}>Cancel</button>
+                  <button className="btn primary" disabled={!rows.length} onClick={runImport}>Import {rows.length} item(s)</button>
+                </div>
+              </>
+            )}
+          </Modal>
+        );
+      })()}
       {adj && (
         <Modal title={`Adjust stock: ${adj.item.name}`} onClose={() => setAdj(null)}>
           <form onSubmit={adjust}>

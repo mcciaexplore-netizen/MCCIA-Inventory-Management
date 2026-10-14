@@ -67,6 +67,18 @@ app.post('/api/login', wrap(async (req, res) => {
   res.json({ token, user: { id: u.id, name: u.name, email: u.email, role: u.role, office: u.office } });
 }));
 
+app.post('/api/register', wrap(async (req, res) => {
+  const { name = '', email = '', password = '', office = '' } = req.body;
+  const em = email.trim().toLowerCase();
+  if (!name.trim() || !em || password.length < 6) return bad(res, 'Name, email and a 6+ character password are required');
+  if (!OFFICES.includes(office.trim())) return bad(res, 'Choose a valid office');
+  if (await db.get('SELECT id FROM users WHERE email=?', [em])) return bad(res, 'An account with this email already exists');
+  const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office) VALUES (?,?,?,?,?)', [name.trim(), em, hashPassword(password), 'staff', office.trim()]);
+  const token = crypto.randomBytes(32).toString('hex');
+  await db.run('INSERT INTO sessions (token,user_id) VALUES (?,?)', [token, id]);
+  res.status(201).json({ token, user: { id, name: name.trim(), email: em, role: 'staff', office: office.trim() } });
+}));
+
 app.use('/api', auth);
 app.get('/api/me', (req, res) => res.json(req.user));
 app.post('/api/logout', wrap(async (req, res) => { await db.run('DELETE FROM sessions WHERE token=?', [req.token]); res.json({ ok: true }); }));
@@ -134,6 +146,34 @@ app.post('/api/items', manager, wrap(async (req, res) => {
     [f.name, f.sku, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email]);
   await audit(req, 'create', 'item', id, `${f.name} [${f.sku}] (opening qty ${f.quantity})`);
   res.status(201).json(await db.get(`${ITEM_SQL} WHERE i.id=?`, [id]));
+}));
+// Bulk import: rows are parsed in the browser (Excel/CSV/PDF); existing item names are skipped.
+app.post('/api/items/bulk', manager, wrap(async (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  if (!rows.length) return bad(res, 'No rows to import');
+  if (rows.length > 2000) return bad(res, 'Import at most 2000 rows at a time');
+  const names = new Set((await db.all('SELECT name FROM items')).map((r) => r.name.trim().toLowerCase()));
+  const cats = new Map((await db.all('SELECT id,name FROM categories')).map((c) => [c.name.toLowerCase(), c.id]));
+  let created = 0; const skipped = [], errors = [];
+  for (const [n, r] of rows.entries()) {
+    const label = `Row ${n + 1}${r.name ? ` (${r.name})` : ''}`;
+    try {
+      const f = itemFields({ ...r, category_id: '' });
+      if (typeof f === 'string') { errors.push(`${label}: ${f}`); continue; }
+      if (names.has(f.name.toLowerCase())) { skipped.push(f.name); continue; }
+      const cname = String(r.category || '').trim();
+      if (cname) {
+        if (!cats.has(cname.toLowerCase())) cats.set(cname.toLowerCase(), await db.insert('INSERT INTO categories (name) VALUES (?)', [cname]));
+        f.category_id = cats.get(cname.toLowerCase());
+      }
+      f.sku = f.sku || await nextSku(f.category_id);
+      const id = await db.insert('INSERT INTO items (name,sku,category_id,quantity,min_quantity,location,notes,unit,rate,vendor,vendor_email) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        [f.name, f.sku, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email]);
+      names.add(f.name.toLowerCase()); created++;
+      await audit(req, 'create', 'item', id, `${f.name} [${f.sku}] (opening qty ${f.quantity}, bulk import)`);
+    } catch (e) { errors.push(`${label}: ${e.message}`); }
+  }
+  res.json({ created, skipped, errors });
 }));
 app.put('/api/items/:id', manager, wrap(async (req, res) => {
   const id = int(req.params.id);
