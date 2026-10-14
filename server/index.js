@@ -11,6 +11,7 @@ import { MONTH_RE, buildReport, closeMonth, listMonths, reportWorkbook } from '.
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true }));
 app.use(express.json());
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 class HttpError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }

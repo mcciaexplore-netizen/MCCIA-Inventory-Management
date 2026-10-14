@@ -4,6 +4,7 @@ export const setToken = (t) => (t ? localStorage.setItem('token', t) : localStor
 async function request(method, url, body) {
   const res = await fetch(url, {
     method,
+    cache: 'no-store',
     headers: { 'Content-Type': 'application/json', ...(getToken() && { Authorization: `Bearer ${getToken()}` }) },
     body: body ? JSON.stringify(body) : undefined,
   });
