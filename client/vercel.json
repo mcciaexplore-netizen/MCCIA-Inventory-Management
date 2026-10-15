@@ -1,6 +1,0 @@
-{
-  "rewrites": [
-    { "source": "/api/:path*", "destination": "https://mccia-inventory-management.onrender.com/api/:path*" },
-    { "source": "/(.*)", "destination": "/index.html" }
-  ]
-}

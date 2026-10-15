@@ -577,11 +577,16 @@ app.delete('/api/users/:id', admin, wrap(async (req, res) => {
 
 app.use('/api', (req, res) => bad(res, `No such endpoint: ${req.method} ${req.originalUrl}`, 404));
 
-// Serve built client if present (single-host setup); on Vercel + Render the client is hosted separately.
-const dist = fileURLToPath(new URL('../client/dist', import.meta.url));
-if (fs.existsSync(dist)) {
-  app.use(express.static(dist));
-  app.get('*', (req, res) => res.sendFile(dist + '/index.html'));
+export default app;
+
+// On Vercel the app runs as a serverless function (api/index.js) and Vercel serves the client itself.
+if (!process.env.VERCEL) {
+  // Serve built client if present (single-host setup).
+  const dist = fileURLToPath(new URL('../client/dist', import.meta.url));
+  if (fs.existsSync(dist)) {
+    app.use(express.static(dist));
+    app.get('*', (req, res) => res.sendFile(dist + '/index.html'));
+  }
+  const port = process.env.PORT || 4000;
+  app.listen(port, () => console.log(`API on http://localhost:${port}`));
 }
-const port = process.env.PORT || 4000;
-app.listen(port, () => console.log(`API on http://localhost:${port}`));

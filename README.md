@@ -9,12 +9,13 @@ Data lives in PostgreSQL (Neon). Set `DATABASE_URL` before starting the server:
 Dev: `npm run dev:server` + `npm run dev:client` (http://localhost:5173).
 First login: admin@mccia.local / admin123 - change it under Users.
 
-## Deploying (Neon + Render + Vercel)
+## Deploying (Neon + Vercel)
 
-1. **Neon**: create a project, copy the connection string (tables are created on first start).
-2. **Render**: new Blueprint from this repo (uses `render.yaml`), set `DATABASE_URL`. Note the service URL.
-3. **Vercel**: import the repo with Root Directory `client`. Put the Render URL in `client/vercel.json` (the `/api` rewrite) first.
-4. Optional: copy existing local data into Neon once: `DATABASE_URL=... node server/migrate_sqlite_to_pg.js`.
+The client and API both run on Vercel: the client is served as static files and the Express API runs as a serverless function (`api/index.js`), configured by the root `vercel.json`.
+
+1. **Neon**: create a project and copy the **pooled** connection string (host contains `-pooler`). Tables are created on first request.
+2. **Vercel**: import the repo with Root Directory left at the repo root (`./`). In Settings → Environment Variables set `DATABASE_URL`.
+3. Optional: copy existing local data into Neon once: `DATABASE_URL=... node server/migrate_sqlite_to_pg.js`.
 
 `import_stock.py` still targets the old local SQLite file; run the Excel import locally, then run the migration script above.
 
