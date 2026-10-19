@@ -5,9 +5,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
-import { consumption, reorder, trend } from './insights.js';
 import { alertRecipients, lowStockEmail, mailReady, poEmail, sendMail } from './mail.js';
-import { MONTH_RE, buildReport, closeMonth, listMonths, reportWorkbook } from './reports.js';
 
 const app = express();
 app.set('trust proxy', 1); // behind Vercel's proxy: req.ip must read the real client IP, not the proxy's.
@@ -42,13 +40,6 @@ const today = () => stamp().slice(0, 10);
 const audit = (req, action, entity, entityId, detail) =>
   db.run('INSERT INTO audit_log (user_id,user_name,action,entity,entity_id,detail,created_at) VALUES (?,?,?,?,?,?,?)',
     [req.user?.id ?? null, req.user?.name ?? null, action, entity, entityId ?? null, detail ?? null, stamp()]);
-// Closed months are frozen: no stock movements may be dated inside or before one, or the next
-// month's opening would no longer match the frozen closing figures.
-async function assertOpen(date) {
-  const month = String(date).slice(0, 7);
-  const { last } = await db.get('SELECT MAX(month) last FROM closed_months');
-  if (last && month <= last) fail(`${last} is closed; entries can't be dated in or before it`);
-}
 // Takes stock out only if enough is left at that moment, so simultaneous issues can't go negative.
 async function takeStock(t, itemId, qty) {
   if (!(await t.get('UPDATE items SET quantity=quantity-? WHERE id=? AND quantity>=? RETURNING id', [qty, itemId, qty]))) {
@@ -221,11 +212,10 @@ app.put('/api/items/:id', employee, wrap(async (req, res) => {
   const old = await db.get('SELECT * FROM items WHERE id=?', [id]);
   if (!old) return bad(res, 'Item not found', 404);
   const delta = f.quantity - old.quantity;
-  if (delta) await assertOpen(today());
   await tx(async (t) => {
     await t.run('UPDATE items SET name=?,category_id=?,quantity=?,min_quantity=?,location=?,notes=?,unit=?,rate=?,vendor=?,vendor_email=? WHERE id=?',
       [f.name, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email, id]);
-    // Quantity edits are recorded as adjustments so month reports stay reconcilable.
+    // Quantity edits are recorded as adjustments so stock history stays traceable.
     if (delta) await t.run('INSERT INTO adjustments (item_id,delta,reason,note,created_by,created_at) VALUES (?,?,?,?,?,?)', [id, delta, 'Edited item', null, req.user.id, stamp()]);
   });
   const changed = ['name', 'category_id', 'quantity', 'min_quantity', 'location', 'unit', 'rate', 'vendor'].filter((k) => (old[k] ?? null) !== (f[k] ?? null)).map((k) => `${k}: ${old[k] ?? '-'} → ${f[k] ?? '-'}`);
@@ -234,7 +224,7 @@ app.put('/api/items/:id', employee, wrap(async (req, res) => {
 }));
 app.delete('/api/items/:id', admin, wrap(async (req, res) => {
   const old = await db.get('SELECT name,quantity FROM items WHERE id=?', [int(req.params.id)]);
-  // Deleting would cascade away purchases, issues and adjustments and silently change open-month reports.
+  // Deleting would cascade away purchases, issues and adjustments, silently erasing stock history.
   const used = await db.get(`SELECT 1 FROM issues WHERE item_id=? UNION ALL SELECT 1 FROM purchases WHERE item_id=?
     UNION ALL SELECT 1 FROM adjustments WHERE item_id=? UNION ALL SELECT 1 FROM requests WHERE item_id=?
     UNION ALL SELECT 1 FROM po_lines WHERE item_id=? LIMIT 1`, Array(5).fill(int(req.params.id)));
@@ -252,7 +242,6 @@ app.post('/api/items/:id/adjust', employee, wrap(async (req, res) => {
   const item = await db.get('SELECT * FROM items WHERE id=?', [id]);
   if (!item) return bad(res, 'Item not found', 404);
   if (item.quantity + delta < 0) return bad(res, `Only ${item.quantity} in stock`);
-  await assertOpen(today());
   await tx(async (t) => {
     await t.run('UPDATE items SET quantity=quantity+? WHERE id=?', [delta, id]);
     await t.run('INSERT INTO adjustments (item_id,delta,reason,note,created_by,created_at) VALUES (?,?,?,?,?,?)', [id, delta, reason, req.body.note || null, req.user.id, stamp()]);
@@ -282,7 +271,6 @@ app.post('/api/purchases', employee, wrap(async (req, res) => {
   if (!(rate >= 0)) return bad(res, 'Rate must be 0 or more');
   const item = await db.get('SELECT * FROM items WHERE id=?', [itemId]);
   if (!item) return bad(res, 'Item not found', 404);
-  await assertOpen(date);
   const vendor = (req.body.vendor || '').trim() || item.vendor || null;
   const challan = (req.body.challan_no || '').trim() || null;
   const pay = paymentFields(req.body); if (typeof pay === 'string') return bad(res, pay);
@@ -379,7 +367,6 @@ app.post('/api/purchase-orders/:id/receive', employee, wrap(async (req, res) => 
   if (!['draft', 'sent'].includes(po.status)) return bad(res, `A ${po.status} order can't be received`);
   const pay = paymentFields(req.body); if (typeof pay === 'string') return bad(res, pay);
   const date = today(), challan = (req.body.challan_no || '').trim() || null;
-  await assertOpen(date);
   const lines = await poLines(po.id);
   await tx(async (t) => {
     for (const l of lines) {
@@ -402,7 +389,6 @@ app.post('/api/issues', employee, wrap(async (req, res) => {
   const item = await db.get('SELECT * FROM items WHERE id=?', [itemId]);
   if (!item) return bad(res, 'Item not found', 404);
   if (item.quantity < qty) return bad(res, `Only ${item.quantity} in stock`);
-  await assertOpen(today());
   await tx(async (t) => {
     await takeStock(t, itemId, qty);
     await t.run('INSERT INTO issues (item_id,quantity,issued_to,department,event,issued_by,issued_at) VALUES (?,?,?,?,?,?,?)', [itemId, qty, to, req.body.department || null, req.body.event || null, req.user.id, stamp()]);
@@ -419,7 +405,6 @@ app.post('/api/issues/batch', employee, wrap(async (req, res) => {
   if (!to) return bad(res, 'Person name is required');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return bad(res, 'Invalid date');
   if (date > today()) return bad(res, "Date can't be in the future");
-  await assertOpen(date);
   const need = new Map();
   for (const l of lines) {
     const id = int(l.item_id), q = int(l.quantity);
@@ -452,7 +437,6 @@ app.post('/api/issues/:id/return', employee, wrap(async (req, res) => {
   if (!iss) return bad(res, 'Not found', 404);
   if (iss.consumed) return bad(res, 'Consumed items cannot be returned');
   if (iss.returned_at) return bad(res, 'Already returned');
-  await assertOpen(today());
   await tx(async (t) => {
     await t.run('UPDATE issues SET returned_at=? WHERE id=?', [stamp(), iss.id]);
     await t.run('UPDATE items SET quantity=quantity+? WHERE id=?', [iss.quantity, iss.item_id]);
@@ -490,7 +474,6 @@ app.post('/api/requests/:id/fulfill', employee, wrap(async (req, res) => {
   if (!r) return bad(res, 'Not found', 404);
   if (r.status !== 'pending') return bad(res, 'Request is not pending');
   if (r.stock < r.quantity) return bad(res, `Only ${r.stock} in stock`);
-  await assertOpen(today());
   await tx(async (t) => {
     const now = stamp();
     await takeStock(t, r.item_id, r.quantity);
@@ -596,45 +579,6 @@ app.post('/api/maintenance/:id/resolve', staffOrAdmin, wrap(async (req, res) => 
   await audit(req, 'resolve', 'maintenance_ticket', t.id, note || null);
   res.json({ ok: true });
 }));
-
-// Monthly register
-app.get('/api/reports/months', wrap(async (req, res) => res.json(await listMonths())));
-const monthParam = (req) => { if (!MONTH_RE.test(req.params.month)) fail('Invalid month'); return req.params.month; };
-app.get('/api/reports/:month', wrap(async (req, res) => res.json(await buildReport(monthParam(req)))));
-app.get('/api/reports/:month/export', wrap(async (req, res) => {
-  const month = monthParam(req);
-  const wb = await reportWorkbook(month);
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="MCCIA-Stock-Register-${month}.xlsx"`);
-  await wb.xlsx.write(res);
-  res.end();
-}));
-app.post('/api/reports/:month/close', employee, wrap(async (req, res) => {
-  const month = monthParam(req);
-  if (month > today().slice(0, 7)) return bad(res, "Can't close a future month");
-  if (await db.get('SELECT 1 FROM closed_months WHERE month=?', [month])) return bad(res, 'Already closed');
-  const n = await closeMonth(month, req.user.id);
-  await audit(req, 'close_month', 'month', null, `${month}: ${n} items frozen`);
-  res.json({ ok: true });
-}));
-app.delete('/api/reports/:month/close', employee, wrap(async (req, res) => {
-  const month = monthParam(req);
-  const c = await db.get('SELECT * FROM closed_months WHERE month=?', [month]);
-  if (!c) return bad(res, 'Month is not closed');
-  if (c.closed_by == null) return bad(res, 'Imported months cannot be reopened');
-  if (await db.get('SELECT 1 FROM closed_months WHERE month>?', [month])) return bad(res, 'Reopen later months first');
-  await tx(async (t) => { await t.run('DELETE FROM month_closings WHERE month=?', [month]); await t.run('DELETE FROM closed_months WHERE month=?', [month]); });
-  await audit(req, 'reopen_month', 'month', null, month);
-  res.json({ ok: true });
-}));
-
-// Insights
-app.get('/api/insights', wrap(async (req, res) => {
-  const m = req.query.month || 'all';
-  if (m !== 'all' && !MONTH_RE.test(m)) return bad(res, 'Invalid month');
-  res.json({ ...(await consumption(m)), trend: await trend() });
-}));
-app.get('/api/insights/reorder', wrap(async (req, res) => res.json(await reorder())));
 
 // Audit log
 app.get('/api/audit', admin, wrap(async (req, res) => {

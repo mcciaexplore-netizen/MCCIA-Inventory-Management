@@ -76,26 +76,3 @@ export function BarList({ rows, format = inr, color = '' }) {
   );
 }
 
-// Paired monthly columns: purchases (green) next to issued (blue).
-export function Trend({ rows }) {
-  const max = Math.max(...rows.flatMap((r) => [r.issued, r.purchases]), 1);
-  const h = (v) => `${Math.max((v / max) * 100, v ? 3 : 0)}%`;
-  return (
-    <>
-      <div className="trend">
-        {rows.map((r) => (
-          <div className="trend-col" key={r.month} title={`${r.label}
-Issued ${inr(r.issued)}
-Purchased ${inr(r.purchases)}`}>
-            <div className="trend-pair">
-              <div className="trend-bar" style={{ height: h(r.issued) }} />
-              <div className="trend-bar green" style={{ height: h(r.purchases) }} />
-            </div>
-            <span className="label">{r.label.slice(0, 3)} {r.month.slice(2, 4)}</span>
-          </div>
-        ))}
-      </div>
-      <div className="legend"><span><i />Issued</span><span><i className="green" />Purchased</span></div>
-    </>
-  );
-}

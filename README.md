@@ -13,7 +13,7 @@ Run the server test suite with `cd server && npm test`; it runs against an isola
 
 ## Roles
 
-- **admin** — everything: users, categories, items, purchase orders, deleting items, the audit log, closing/reopening months.
+- **admin** — everything: users, categories, items, purchase orders, deleting items, the audit log.
 - **employee** — day-to-day inventory work: items, purchases, purchase orders, issuing/returning stock, fulfilling staff requests, raising maintenance complaints.
 - **staff** — the lowest-privilege role: browse items, raise their own stock requests, and resolve maintenance complaints (see below).
 
@@ -47,12 +47,8 @@ The client and API both run on Vercel: the client is served as static files and 
 
     DATABASE_URL=... node server/import_stock.js SEPTEMBER-2026.xlsx
 
-Loads items from the vendor sheets, consumption rows as history, and the sheet's figures as a closed month. Writes to Neon when `DATABASE_URL` is set, otherwise to the local database. Aborts if the vendors' items already exist; `--snapshot-only` attaches just the month register to items imported earlier.
+A one-off CLI tool for loading items and historical consumption from a vendor Excel register. Writes to Neon when `DATABASE_URL` is set, otherwise to the local database. Aborts if the vendors' items already exist; `--snapshot-only` attaches just the month's figures to items imported earlier. There's no in-app page for the monthly register itself (that feature was removed); this is purely for seeding historical item/consumption data.
 
-## Month-end workflow
+## Day-to-day workflow
 
-1. Day to day: **Daily Entry** (consumption), **Issue / Return** (loans), **Purchases** (stock in with challan), **Items > Adjust** (damage, loss, recount).
-2. **Monthly Report** shows opening, purchases, issues and closing per vendor; **Excel** exports it.
-3. **Close month** freezes the figures; closing stock becomes next month's opening and nothing can be dated in or before a closed month.
-
-All stock changes are recorded in the **Audit Log** (admin).
+**Daily Entry** (consumption), **Issue / Return** (loans), **Purchases** (stock in with challan), **Items > Adjust** (damage, loss, recount). All stock changes are recorded in the **Audit Log** (admin).
