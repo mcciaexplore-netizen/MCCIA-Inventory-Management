@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api.js';
 import { Alert, Field } from '../components/ui.jsx';
 
-export default function Account({ user }) {
+export default function Account({ user, forced = false, onChanged }) {
   const [f, setF] = useState({ current_password: '', new_password: '', confirm: '' });
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
@@ -14,6 +14,7 @@ export default function Account({ user }) {
       await api.post('/api/me/password', { current_password: f.current_password, new_password: f.new_password });
       setOk('Password changed. Other devices have been signed out.');
       setF({ current_password: '', new_password: '', confirm: '' });
+      onChanged?.();
     } catch (err) { setError(err.message); }
   }
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -23,6 +24,7 @@ export default function Account({ user }) {
       <div className="page-head reveal"><div><span className="label">Account</span><h1>{user.name}</h1><p>{user.email} · {user.role}</p></div></div>
       <form className="card reveal" style={{ maxWidth: 480 }} onSubmit={save}>
         <h3 style={{ marginBottom: '1rem' }}>Change password</h3>
+        {forced && <p style={{ marginBottom: '1rem' }}>Your password was set by an admin or is the default one. Choose a new password to continue.</p>}
         <Alert>{error}</Alert>
         <Alert kind="success">{ok}</Alert>
         <Field label="Current password"><input type="password" required value={f.current_password} onChange={set('current_password')} /></Field>

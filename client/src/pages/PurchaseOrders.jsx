@@ -25,7 +25,9 @@ export default function PurchaseOrders() {
     setError(''); setNote('');
     try { await fn(); close(); if (msg) setNote(msg); load(); } catch (err) { setError(err.message); }
   }
-  async function view(id) { open({ type: 'view', ...(await api.get(`/api/purchase-orders/${id}`)) }); }
+  async function view(id) {
+    try { open({ type: 'view', ...(await api.get(`/api/purchase-orders/${id}`)) }); } catch (err) { setError(err.message); }
+  }
   const lowCount = items.filter((i) => i.min_quantity > 0 && i.quantity <= i.min_quantity).length;
 
   const setLine = (n, k) => (e) => setModal({ ...modal, lines: modal.lines.map((l, i) => {
@@ -108,7 +110,7 @@ export default function PurchaseOrders() {
             <table>
               <thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate ₹</th><th>Amount ₹</th></tr></thead>
               <tbody>
-                {modal.lines.map((l, n) => <tr key={l.id}><td>{n + 1}</td><td>{l.item_name}{l.sku && <span className="label"> {l.sku}</span>}</td><td>{l.quantity} {l.unit || ''}</td><td>{inr(l.rate)}</td><td>{inr(l.quantity * l.rate)}</td></tr>)}
+                {modal.lines.map((l, n) => <tr key={l.id}><td>{n + 1}</td><td>{l.item_name}</td><td>{l.quantity} {l.unit || ''}</td><td>{inr(l.rate)}</td><td>{inr(l.quantity * l.rate)}</td></tr>)}
                 <tr><td colSpan="4" style={{ textAlign: 'right' }}><strong>Total</strong></td><td><strong>{inr(modal.total)}</strong></td></tr>
               </tbody>
             </table>

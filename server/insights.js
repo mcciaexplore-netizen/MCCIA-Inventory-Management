@@ -5,8 +5,9 @@ import { buildReport, currentMonth, listMonths } from './reports.js';
 const VALUE = 'COALESCE(i.rate,0) * s.quantity';
 
 export async function consumption(month) {
-  const where = month && month !== 'all' ? "WHERE substr(s.issued_at,1,7) = ?" : '';
-  const args = where ? [month] : [];
+  // Only consumed issues count; loans come back and aren't consumption.
+  const where = `WHERE s.consumed=1${month && month !== 'all' ? ' AND substr(s.issued_at,1,7) = ?' : ''}`;
+  const args = month && month !== 'all' ? [month] : [];
   const q = (sql) => db.all(sql, args);
   const [byEvent, byPerson, topItems] = await Promise.all([
     q(`SELECT COALESCE(NULLIF(TRIM(s.event),''),'(no event)') label, SUM(${VALUE}) value, SUM(s.quantity) qty, COUNT(*) entries
@@ -51,7 +52,7 @@ export async function reorder() {
     const suggest = Math.max(0, target - i.quantity);
     if (!suggest || (cover !== null && cover >= 1 && !belowMin)) continue;
     out.push({
-      id: i.id, name: i.name, sku: i.sku, vendor: i.vendor || 'In-house', category: i.category, unit: i.unit,
+      id: i.id, name: i.name, vendor: i.vendor || 'In-house', category: i.category, unit: i.unit,
       quantity: i.quantity, avgMonthly: Math.round(avg * 10) / 10, coverMonths: cover === null ? null : Math.round(cover * 10) / 10,
       suggest, rate: i.rate || 0, cost: suggest * (i.rate || 0),
     });

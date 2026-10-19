@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { Alert } from '../components/ui.jsx';
 
-const ENTITIES = ['item', 'issue', 'category', 'user', 'month'];
+const ENTITIES = ['item', 'issue', 'request', 'purchase_order', 'category', 'user', 'month', 'maintenance_ticket'];
 const fmt = (s) => new Date(s.replace(' ', 'T')).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 
 export default function Audit() {

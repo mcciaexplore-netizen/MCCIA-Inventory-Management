@@ -28,15 +28,15 @@ const shell = (title, body) => `<div style="font-family:Arial,sans-serif;max-wid
   <img src="cid:mccia-logo" alt="MCCIA" style="height:56px"><h2 style="margin:16px 0 4px">${esc(title)}</h2>${body}
   <p style="color:#6b7785;font-size:12px;margin-top:24px">${esc(ORG)} · Inventory Management System</p></div>`;
 
-// Recipients for internal alerts: ALERT_EMAIL, else admin/manager accounts whose login is a real email address.
+// Recipients for internal alerts: ALERT_EMAIL, else admin/employee accounts whose login is a real email address.
 export async function alertRecipients() {
   if (process.env.ALERT_EMAIL) return process.env.ALERT_EMAIL.split(',').map((s) => s.trim()).filter(Boolean);
-  const rows = await db.all(`SELECT email FROM users WHERE role IN ('admin','manager')`);
+  const rows = await db.all(`SELECT email FROM users WHERE role IN ('admin','employee')`);
   return rows.map((r) => r.email).filter((e) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e) && !e.endsWith('.local'));
 }
 
 export function poEmail(po, lines) {
-  const rows = lines.map((l, i) => `<tr><td style="padding:6px;border:1px solid #d8dee5">${i + 1}</td><td style="padding:6px;border:1px solid #d8dee5">${esc(l.item_name)}${l.sku ? ` <small>(${esc(l.sku)})</small>` : ''}</td>
+  const rows = lines.map((l, i) => `<tr><td style="padding:6px;border:1px solid #d8dee5">${i + 1}</td><td style="padding:6px;border:1px solid #d8dee5">${esc(l.item_name)}</td>
     <td style="padding:6px;border:1px solid #d8dee5;text-align:right">${l.quantity} ${esc(l.unit || '')}</td><td style="padding:6px;border:1px solid #d8dee5;text-align:right">₹${inr(l.rate)}</td>
     <td style="padding:6px;border:1px solid #d8dee5;text-align:right">₹${inr(l.quantity * l.rate)}</td></tr>`).join('');
   const total = lines.reduce((a, l) => a + l.quantity * l.rate, 0);
@@ -47,6 +47,6 @@ export function poEmail(po, lines) {
 }
 
 export function lowStockEmail(item) {
-  return shell('Low stock alert', `<p><strong>${esc(item.name)}</strong>${item.sku ? ` (${esc(item.sku)})` : ''} has dropped to <strong>${item.quantity}</strong> ${esc(item.unit || '')},
+  return shell('Low stock alert', `<p><strong>${esc(item.name)}</strong> has dropped to <strong>${item.quantity}</strong> ${esc(item.unit || '')},
     at or below its minimum level of ${item.min_quantity}.</p><p>Open the Purchase Orders page and use "Draft POs for low stock" to reorder.</p>`);
 }

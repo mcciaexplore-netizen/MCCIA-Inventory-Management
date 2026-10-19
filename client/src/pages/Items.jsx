@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { Alert, Field, Modal } from '../components/ui.jsx';
 import { FIELDS, buildRows, guessLayout, readGrid } from '../importFile.js';
 
-const blank = { name: '', sku: '', category_id: '', quantity: 0, min_quantity: 0, location: '', notes: '', unit: '', rate: '', vendor: '', vendor_email: '' };
+const blank = { name: '', category_id: '', quantity: 0, min_quantity: 0, location: '', notes: '', unit: '', rate: '', vendor: '', vendor_email: '' };
 
 export default function Items({ isAdmin, canManage }) {
   const [items, setItems] = useState([]);
@@ -21,7 +21,7 @@ export default function Items({ isAdmin, canManage }) {
 
   const shown = useMemo(() => items.filter((i) =>
     (!cat || String(i.category_id) === cat) &&
-    `${i.name} ${i.sku || ''} ${i.location || ''} ${i.vendor || ''}`.toLowerCase().includes(q.toLowerCase())), [items, q, cat]);
+    `${i.name} ${i.location || ''} ${i.vendor || ''}`.toLowerCase().includes(q.toLowerCase())), [items, q, cat]);
 
   async function save(e) {
     e.preventDefault(); setError('');
@@ -31,7 +31,7 @@ export default function Items({ isAdmin, canManage }) {
     } catch (err) { setError(err.message); }
   }
   async function remove(i) {
-    if (!confirm(`Delete "${i.name}" and its issue history?`)) return;
+    if (!confirm(`Delete "${i.name}"? Only items with no stock history can be deleted.`)) return;
     try { await api.del(`/api/items/${i.id}`); load(); } catch (err) { setError(err.message); }
   }
   async function adjust(e) {
@@ -68,7 +68,7 @@ export default function Items({ isAdmin, canManage }) {
       </div>
       {!edit && !imp && <Alert>{error}</Alert>}
       <div className="toolbar reveal">
-        <input placeholder="Search name, SKU, vendor or location…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input placeholder="Search name, vendor or location…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select value={cat} onChange={(e) => setCat(e.target.value)}>
           <option value="">All categories</option>
           {cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -77,12 +77,11 @@ export default function Items({ isAdmin, canManage }) {
       <div className="card flush reveal" style={{ '--i': 1 }}>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Item</th><th>SKU</th><th>Category</th><th>Vendor</th><th>Rate</th><th>Qty</th>{canManage && <th />}</tr></thead>
+            <thead><tr><th>Item</th><th>Category</th><th>Vendor</th><th>Rate</th><th>Qty</th>{canManage && <th />}</tr></thead>
             <tbody>
               {shown.map((i) => (
                 <tr key={i.id}>
                   <td><strong>{i.name}</strong></td>
-                  <td>{i.sku || '—'}</td>
                   <td>{i.category ? <span className="chip">{i.category}</span> : '—'}</td>
                   <td>{i.vendor || '—'}</td>
                   <td>{i.rate != null ? `₹${i.rate.toLocaleString('en-IN')}` : '—'}{i.unit ? <span className="label"> / {i.unit}</span> : ''}</td>
@@ -173,15 +172,12 @@ export default function Items({ isAdmin, canManage }) {
           <form onSubmit={save}>
             <Alert>{error}</Alert>
             <Field label="Name"><input required value={edit.name} onChange={set('name')} /></Field>
-            <div className="form-row">
-              <Field label="SKU"><input value={edit.sku || ''} onChange={set('sku')} placeholder="Auto-generated" /></Field>
-              <Field label="Category">
-                <select value={edit.category_id || ''} onChange={set('category_id')}>
-                  <option value="">None</option>
-                  {cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </Field>
-            </div>
+            <Field label="Category">
+              <select value={edit.category_id || ''} onChange={set('category_id')}>
+                <option value="">None</option>
+                {cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
             <div className="form-row">
               <Field label="Quantity"><input type="number" min="0" required value={edit.quantity} onChange={set('quantity')} /></Field>
               <Field label="Low-stock threshold"><input type="number" min="0" value={edit.min_quantity} onChange={set('min_quantity')} /></Field>

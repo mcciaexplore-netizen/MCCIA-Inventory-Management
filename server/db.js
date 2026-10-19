@@ -12,11 +12,26 @@ const EMBEDDED = !process.env.DATABASE_URL;
 let pool;
 if (EMBEDDED) {
   const { PGlite } = await import('@electric-sql/pglite');
-  const lite = await PGlite.create(fileURLToPath(new URL('./.pgdata', import.meta.url)));
+  // PGLITE_DIR=:memory: gives each process (e.g. a test run) its own throwaway in-memory database.
+  const dataDir = process.env.PGLITE_DIR === ':memory:' ? undefined : (process.env.PGLITE_DIR || fileURLToPath(new URL('./.pgdata', import.meta.url)));
+  const lite = await PGlite.create(dataDir);
   const opts = { parsers: { 20: Number, 1700: Number } };
-  const client = { query: async (sql, params) => (params?.length ? lite.query(sql, params, opts) : (await lite.exec(sql, opts)).at(-1)), release() {} };
-  pool = { ...client, connect: async () => client };
-  console.log('DATABASE_URL not set: using embedded sample database (server/.pgdata)');
+  const raw = async (sql, params) => (params?.length ? lite.query(sql, params, opts) : (await lite.exec(sql, opts)).at(-1));
+  // PGlite is a single connection, so a transaction must hold it exclusively: otherwise another
+  // request's queries would run inside (and commit or roll back with) that transaction.
+  let tail = Promise.resolve();
+  const acquire = () => {
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const ready = tail.then(() => release);
+    tail = tail.then(() => held);
+    return ready;
+  };
+  pool = {
+    query: async (sql, params) => { const release = await acquire(); try { return await raw(sql, params); } finally { release(); } },
+    connect: async () => { const release = await acquire(); return { query: raw, release }; },
+  };
+  console.log(`DATABASE_URL not set: using embedded sample database (${dataDir ? 'server/.pgdata' : 'in-memory'})`);
 } else {
   pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: Number(process.env.PG_POOL_MAX) || 5 });
 }
@@ -59,7 +74,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT DEFAULT ${NOW_IST});
 CREATE TABLE IF NOT EXISTS categories (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS items (
-  id SERIAL PRIMARY KEY, name TEXT NOT NULL, sku TEXT UNIQUE,
+  id SERIAL PRIMARY KEY, name TEXT NOT NULL,
   category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
   quantity INTEGER NOT NULL DEFAULT 0, min_quantity INTEGER NOT NULL DEFAULT 0,
   location TEXT, notes TEXT, created_at TEXT DEFAULT ${NOW_IST},
@@ -105,6 +120,7 @@ CREATE TABLE IF NOT EXISTS month_closings (
   adjusted INTEGER NOT NULL DEFAULT 0, issued INTEGER NOT NULL DEFAULT 0, closing INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_closings_month ON month_closings(month);
+ALTER TABLE items DROP COLUMN IF EXISTS sku;
 ALTER TABLE items ADD COLUMN IF NOT EXISTS vendor_email TEXT;
 ALTER TABLE purchases ADD COLUMN IF NOT EXISTS payment_method TEXT;
 ALTER TABLE purchases ADD COLUMN IF NOT EXISTS payment_ref TEXT;
@@ -117,6 +133,34 @@ CREATE TABLE IF NOT EXISTS po_lines (
   id SERIAL PRIMARY KEY, po_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
   item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE, quantity INTEGER NOT NULL, rate DOUBLE PRECISION NOT NULL DEFAULT 0
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS login_failures (email TEXT NOT NULL, at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_login_failures ON login_failures(email, at);
+
+-- Service/maintenance complaints: an employee (or admin) raises one with a note and/or photo;
+-- staff (or admin) close it out by attaching a photo of the fix.
+CREATE TABLE IF NOT EXISTS maintenance_tickets (
+  id SERIAL PRIMARY KEY, note TEXT, photo_url TEXT, status TEXT NOT NULL DEFAULT 'open',
+  raised_by INTEGER REFERENCES users(id) ON DELETE SET NULL, raised_at TEXT DEFAULT ${NOW_IST},
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL, resolved_at TEXT,
+  resolution_note TEXT, resolution_photo_url TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_status ON maintenance_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_maintenance_raised_by ON maintenance_tickets(raised_by);
+
+-- Postgres doesn't auto-index foreign keys; these back the joins/point-lookups index.js and
+-- reports.js actually run (the item-delete stock-history check, staff's own requests/queries, audit filtering).
+CREATE INDEX IF NOT EXISTS idx_items_category ON items(category_id);
+CREATE INDEX IF NOT EXISTS idx_issues_item ON issues(item_id);
+CREATE INDEX IF NOT EXISTS idx_purchases_item ON purchases(item_id);
+CREATE INDEX IF NOT EXISTS idx_adjustments_item ON adjustments(item_id);
+CREATE INDEX IF NOT EXISTS idx_requests_item ON requests(item_id);
+CREATE INDEX IF NOT EXISTS idx_requests_requested_by ON requests(requested_by);
+CREATE INDEX IF NOT EXISTS idx_queries_raised_by ON queries(raised_by);
+CREATE INDEX IF NOT EXISTS idx_po_lines_item ON po_lines(item_id);
+CREATE INDEX IF NOT EXISTS idx_po_lines_po ON po_lines(po_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity);
 `);
 
 // "YYYY-MM-DD HH:MM:SS" in Asia/Kolkata
@@ -127,21 +171,13 @@ export function stamp(d = new Date()) {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
 }
 
-// SKU = 3-letter category prefix + running number per prefix, e.g. STA-0001. Items without a category use GEN.
-export async function nextSku(categoryId, ex = db) {
-  const cat = categoryId ? await ex.get('SELECT name FROM categories WHERE id=?', [categoryId]) : null;
-  const prefix = ((cat?.name || 'GEN').replace(/[^A-Za-z]/g, '').slice(0, 3) || 'GEN').toUpperCase();
-  let max = 0;
-  for (const r of await ex.all('SELECT sku FROM items WHERE sku LIKE ?', [`${prefix}-%`])) {
-    const n = Number(r.sku.slice(prefix.length + 1));
-    if (Number.isInteger(n) && n > max) max = n;
-  }
-  return `${prefix}-${String(max + 1).padStart(4, '0')}`;
-}
+// Fulfilled requests used to be recorded as open loans; mark them consumed. Reports are unaffected
+// (an unreturned loan and a consumed issue both count as issued once).
+await db.run(`UPDATE issues SET consumed=1, returned_at=issued_at
+  WHERE consumed=0 AND returned_at IS NULL AND id IN (SELECT issue_id FROM requests WHERE status='fulfilled' AND issue_id IS NOT NULL)`);
 
-// Give every item that has no SKU one, oldest first.
-for (const it of await db.all(`SELECT id, category_id FROM items WHERE sku IS NULL OR sku = '' ORDER BY id`))
-  await db.run('UPDATE items SET sku=? WHERE id=?', [await nextSku(it.category_id), it.id]);
+// The 'manager' role was renamed to 'employee'; migrate any existing rows.
+await db.run(`UPDATE users SET role='employee' WHERE role='manager'`);
 
 export function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -155,12 +191,15 @@ export function verifyPassword(pw, stored) {
 }
 
 if (!(await db.get('SELECT 1 FROM users LIMIT 1'))) {
-  await db.run('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)',
+  await db.run('INSERT INTO users (name,email,password_hash,role,must_change_password) VALUES (?,?,?,?,TRUE)',
     ['Administrator', 'admin@mccia.local', hashPassword('admin123'), 'admin']);
   for (const c of ['IT Equipment', 'Furniture', 'Stationery', 'Housekeeping', 'Audio/Visual', 'Other'])
     await db.run('INSERT INTO categories (name) VALUES (?)', [c]);
-  console.log('Seeded admin user: admin@mccia.local / admin123 (change it!)');
+  console.log('Seeded admin user: admin@mccia.local / admin123 (must be changed at first login)');
 }
+// Databases created before the forced change: make the seeded admin change the default password too.
+const seeded = await db.get(`SELECT id,password_hash FROM users WHERE email='admin@mccia.local' AND NOT must_change_password`);
+if (seeded && verifyPassword('admin123', seeded.password_hash)) await db.run('UPDATE users SET must_change_password=TRUE WHERE id=?', [seeded.id]);
 
 if (EMBEDDED && !(await db.get('SELECT 1 FROM items LIMIT 1'))) {
   const cat = async (n) => (await db.get('SELECT id FROM categories WHERE name=?', [n])).id;
@@ -170,8 +209,8 @@ if (EMBEDDED && !(await db.get('SELECT 1 FROM items LIMIT 1'))) {
     ['Wireless Mouse', 'IT Equipment', 'Nos', 650, 3, 4, 'Digital Hub'], ['Phenyl 5L', 'Housekeeping', 'Can', 480, 12, 3, 'Clean Co'],
   ];
   for (const [name, c, unit, rate, quantity, min, vendor] of sample) {
-    const id = await db.insert('INSERT INTO items (name,sku,category_id,quantity,min_quantity,unit,rate,vendor) VALUES (?,?,?,?,?,?,?,?)',
-      [name, await nextSku(await cat(c)), await cat(c), quantity, min, unit, rate, vendor]);
+    const id = await db.insert('INSERT INTO items (name,category_id,quantity,min_quantity,unit,rate,vendor) VALUES (?,?,?,?,?,?,?)',
+      [name, await cat(c), quantity, min, unit, rate, vendor]);
     await db.run('INSERT INTO issues (item_id,quantity,issued_to,event,issued_at,returned_at,consumed) VALUES (?,?,?,?,?,?,1)', [id, 5, 'Front Desk', 'Daily use', stamp(), stamp()]);
   }
   console.log('Loaded sample items.');

@@ -7,7 +7,33 @@ Data lives in PostgreSQL (Neon). Set `DATABASE_URL` before starting the server:
     npm run build && npm start     # http://localhost:4000
 
 Dev: `npm run dev:server` + `npm run dev:client` (http://localhost:5173).
-First login: admin@mccia.local / admin123 - change it under Users.
+First login: office **Head Office**, admin@mccia.local / admin123. You'll be asked to choose a new password straight away.
+
+Run the server test suite with `cd server && npm test`; it runs against an isolated in-memory database, so it's safe to run anytime.
+
+## Roles
+
+- **admin** — everything: users, categories, items, purchase orders, deleting items, the audit log, closing/reopening months.
+- **employee** — day-to-day inventory work: items, purchases, purchase orders, issuing/returning stock, fulfilling staff requests, raising maintenance complaints.
+- **staff** — the lowest-privilege role: browse items, raise their own stock requests, and resolve maintenance complaints (see below).
+
+## Accounts
+
+- **Sign-up** creates a pending staff account; an admin approves it (and can pick the role) under **Users**.
+- Users created or reset by an admin must choose their own password at their next sign-in.
+- Sessions last 30 days. After 5 failed sign-ins an email is locked out for 15 minutes.
+- An admin can change a user's role or office at any time under **Users**.
+
+## Maintenance complaints
+
+An employee (or admin) reports a service/maintenance issue under **Maintenance**, with a note and/or a photo. Staff (or admin) see every open complaint and close it out by attaching a photo of the fix.
+
+Photos are stored in **Vercel Blob**, not on the server's disk (there isn't one in a serverless deployment):
+
+1. In the Vercel project, add a Blob store (Storage tab) and copy its `BLOB_READ_WRITE_TOKEN`.
+2. Set `BLOB_READ_WRITE_TOKEN` as an environment variable on the project (and locally in `.env` for dev).
+
+Without that token, reporting/resolving with a photo fails with a clear "Photo storage is not configured" error; reporting with just a note still works.
 
 ## Deploying (Neon + Vercel)
 
@@ -17,19 +43,16 @@ The client and API both run on Vercel: the client is served as static files and 
 2. **Vercel**: import the repo with Root Directory left at the repo root (`./`). In Settings → Environment Variables set `DATABASE_URL`.
 3. Optional: copy existing local data into Neon once: `DATABASE_URL=... node server/migrate_sqlite_to_pg.js`.
 
-`import_stock.py` still targets the old local SQLite file; run the Excel import locally, then run the migration script above.
-
 ## Importing a monthly register
 
-    pip install openpyxl
-    python server/import_stock.py SEPTEMBER-2026.xlsx
+    DATABASE_URL=... node server/import_stock.js SEPTEMBER-2026.xlsx
 
-Loads items from the vendor sheets and consumption rows as history. Aborts if vendor items already exist.
+Loads items from the vendor sheets, consumption rows as history, and the sheet's figures as a closed month. Writes to Neon when `DATABASE_URL` is set, otherwise to the local database. Aborts if the vendors' items already exist; `--snapshot-only` attaches just the month register to items imported earlier.
 
 ## Month-end workflow
 
 1. Day to day: **Daily Entry** (consumption), **Issue / Return** (loans), **Purchases** (stock in with challan), **Items > Adjust** (damage, loss, recount).
 2. **Monthly Report** shows opening, purchases, issues and closing per vendor; **Excel** exports it.
-3. **Close month** freezes the figures; closing stock becomes next month's opening and nothing can be dated inside a closed month.
+3. **Close month** freezes the figures; closing stock becomes next month's opening and nothing can be dated in or before a closed month.
 
 All stock changes are recorded in the **Audit Log** (admin).

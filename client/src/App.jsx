@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { BarChart3, LineChart, ClipboardList, FileText, FolderTree, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, UserCog, Users as UsersIcon, X } from 'lucide-react';
+import { BarChart3, LineChart, ClipboardList, FileText, FolderTree, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
 import { api, getToken, setToken } from './api.js';
 const PurchaseOrders = lazy(() => import('./pages/PurchaseOrders.jsx'));
 const Requests = lazy(() => import('./pages/Requests.jsx'));
@@ -16,6 +16,7 @@ const Entry = lazy(() => import('./pages/Entry.jsx'));
 const Audit = lazy(() => import('./pages/Audit.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
 const Insights = lazy(() => import('./pages/Insights.jsx'));
+const Maintenance = lazy(() => import('./pages/Maintenance.jsx'));
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -32,8 +33,21 @@ export default function App() {
   if (!user) return <Login onLogin={setUser} />;
 
   const isAdmin = user.role === 'admin';
-  const canManage = isAdmin || user.role === 'manager';
+  const canManage = isAdmin || user.role === 'employee';
   const logout = async () => { await api.post('/api/logout').catch(() => {}); setToken(null); setUser(null); };
+
+  // A default or admin-set password must be replaced before anything else is usable.
+  if (user.must_change_password) {
+    return (
+      <div className="login-page">
+        <div className="glow" />
+        <div style={{ width: '100%', maxWidth: 480 }}>
+          <Suspense fallback={null}><Account user={user} forced onChanged={() => setUser({ ...user, must_change_password: false })} /></Suspense>
+          <button className="btn ghost" style={{ marginTop: '1rem' }} onClick={logout}><LogOut /> Sign out</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="shell">
@@ -54,6 +68,7 @@ export default function App() {
           {canManage && <NavLink to="/orders"><FileText /> Purchase Orders</NavLink>}
           <NavLink to="/reports"><BarChart3 /> Monthly Report</NavLink>
           <NavLink to="/insights"><LineChart /> Insights</NavLink>
+          <NavLink to="/maintenance"><Wrench /> Maintenance</NavLink>
           {isAdmin && <NavLink to="/categories"><FolderTree /> Categories</NavLink>}
           {isAdmin && <NavLink to="/users"><UsersIcon /> Users</NavLink>}
           {isAdmin && <NavLink to="/audit"><History /> Audit Log</NavLink>}
@@ -74,6 +89,7 @@ export default function App() {
           <Route path="/requests" element={<Requests canManage={canManage} />} />
           <Route path="/entry" element={canManage ? <Entry /> : <Navigate to="/" />} />
           <Route path="/insights" element={<Insights />} />
+          <Route path="/maintenance" element={<Maintenance user={user} />} />
           <Route path="/reports" element={<Reports isAdmin={canManage} />} />
           <Route path="/purchases" element={canManage ? <Purchases /> : <Navigate to="/" />} />
           <Route path="/audit" element={isAdmin ? <Audit /> : <Navigate to="/" />} />

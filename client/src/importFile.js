@@ -46,7 +46,6 @@ export const FIELDS = [
   { key: 'min_quantity', label: 'Low-stock threshold', match: /min|reorder|threshold/ },
   { key: 'vendor', label: 'Vendor', match: /vendor|supplier/ },
   { key: 'vendor_email', label: 'Vendor email', match: /e-?mail/ },
-  { key: 'sku', label: 'SKU', match: /sku|code/ },
   { key: 'location', label: 'Location', match: /location|rack|shelf/ },
   { key: 'notes', label: 'Notes', match: /note|remark/ },
 ];

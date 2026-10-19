@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { KeyRound, Plus, Trash2 } from 'lucide-react';
+import { Check, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api.js';
 import { Alert, Field, Modal } from '../components/ui.jsx';
 
@@ -27,12 +27,17 @@ export default function Users({ me }) {
     e.preventDefault(); setError('');
     try { await api.post(`/api/users/${reset.user.id}/password`, { password: reset.password }); setReset(null); } catch (err) { setError(err.message); }
   }
+  async function act(fn) {
+    setError('');
+    try { await fn(); load(); } catch (err) { setError(err.message); }
+  }
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const pending = users.filter((u) => !u.approved).length;
 
   return (
     <>
       <div className="page-head reveal">
-        <div><span className="label">Access</span><h1>Users</h1></div>
+        <div><span className="label">Access</span><h1>Users</h1>{pending > 0 && <p>{pending} sign-up{pending > 1 ? 's' : ''} waiting for approval.</p>}</div>
         <button className="btn primary" onClick={() => { setError(''); setForm(blank); }}><Plus /> Add user</button>
       </div>
       {!form && !reset && <Alert>{error}</Alert>}
@@ -43,9 +48,23 @@ export default function Users({ me }) {
             <tbody>
               {users.map((u) => (
                 <tr key={u.id}>
-                  <td><strong>{u.name}</strong></td><td>{u.email}</td><td>{u.office}</td>
-                  <td><span className={`badge ${u.role === 'admin' ? '' : 'green'}`}>{u.role}</span></td>
-                  <td className="actions"><button className="btn ghost sm" title="Reset password" onClick={() => { setError(''); setReset({ user: u, password: '' }); }}><KeyRound /></button>
+                  <td><strong>{u.name}</strong></td><td>{u.email}</td>
+                  <td>
+                    <select value={u.office} aria-label={`Office for ${u.name}`} onChange={(e) => act(() => api.put(`/api/users/${u.id}/office`, { office: e.target.value }))}>
+                      {offices.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    {u.id === me.id ? <span className="badge">{u.role}</span> : (
+                      <select value={u.role} aria-label={`Role for ${u.name}`} onChange={(e) => act(() => api.put(`/api/users/${u.id}/role`, { role: e.target.value }))}>
+                        <option value="staff">Staff</option><option value="employee">Employee</option><option value="admin">Admin</option>
+                      </select>
+                    )}
+                    {!u.approved && <span className="badge red" style={{ marginLeft: '0.4rem' }}>pending</span>}
+                  </td>
+                  <td className="actions">
+                    {!u.approved && <button className="btn primary sm" onClick={() => act(() => api.post(`/api/users/${u.id}/approve`))}><Check /> Approve</button>}
+                    <button className="btn ghost sm" title="Reset password" onClick={() => { setError(''); setReset({ user: u, password: '' }); }}><KeyRound /></button>
                     {u.id !== me.id && <button className="btn danger sm" onClick={() => remove(u)}><Trash2 /></button>}</td>
                 </tr>
               ))}
@@ -57,7 +76,7 @@ export default function Users({ me }) {
         <Modal title={`Reset password: ${reset.user.name}`} onClose={() => setReset(null)}>
           <form onSubmit={doReset}>
             <Alert>{error}</Alert>
-            <p style={{ marginBottom: '1rem' }}>They will be signed out everywhere and must use the new password.</p>
+            <p style={{ marginBottom: '1rem' }}>They will be signed out everywhere and must choose their own password after signing in with this one.</p>
             <Field label="New password"><input type="password" required minLength="6" autoFocus value={reset.password} onChange={(e) => setReset({ ...reset, password: e.target.value })} /></Field>
             <div className="modal-actions">
               <button type="button" className="btn ghost" onClick={() => setReset(null)}>Cancel</button>
@@ -75,7 +94,7 @@ export default function Users({ me }) {
             <Field label="Office"><select value={form.office} onChange={set('office')}>{offices.map((o) => <option key={o} value={o}>{o}</option>)}</select></Field>
             <div className="form-row">
               <Field label="Password"><input type="password" minLength="6" required value={form.password} onChange={set('password')} /></Field>
-              <Field label="Role"><select value={form.role} onChange={set('role')}><option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option></select></Field>
+              <Field label="Role"><select value={form.role} onChange={set('role')}><option value="staff">Staff</option><option value="employee">Employee</option><option value="admin">Admin</option></select></Field>
             </div>
             <div className="modal-actions">
               <button type="button" className="btn ghost" onClick={() => setForm(null)}>Cancel</button>

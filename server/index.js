@@ -2,16 +2,28 @@ import express from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import cors from 'cors';
+import multer from 'multer';
+import { put } from '@vercel/blob';
+import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
-import { db, tx, hashPassword, verifyPassword, stamp, nextSku, OFFICES } from './db.js';
+import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
 import { consumption, reorder, trend } from './insights.js';
 import { alertRecipients, lowStockEmail, mailReady, poEmail, sendMail } from './mail.js';
 import { MONTH_RE, buildReport, closeMonth, listMonths, reportWorkbook } from './reports.js';
 
 const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true }));
+app.set('trust proxy', 1); // behind Vercel's proxy: req.ip must read the real client IP, not the proxy's.
+// Client and API share one origin in both dev (Vite proxy) and prod (Vercel rewrite), so cross-origin
+// access isn't needed by default; set CORS_ORIGIN (comma-separated) only if a separate domain needs it.
+const corsOrigins = (process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
+app.use(cors({ origin: corsOrigins.length ? corsOrigins : false }));
 app.use(express.json());
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+// Generic per-IP throttle against scripted abuse across the whole API (the DB-backed per-email
+// lockout below still governs actual login brute-forcing). Resets on each serverless cold start,
+// so it's a coarse defense-in-depth layer, not the only one.
+app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false }));
+const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many sign-up attempts. Try again later.' } });
 
 class HttpError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -32,10 +44,19 @@ const today = () => stamp().slice(0, 10);
 const audit = (req, action, entity, entityId, detail) =>
   db.run('INSERT INTO audit_log (user_id,user_name,action,entity,entity_id,detail,created_at) VALUES (?,?,?,?,?,?,?)',
     [req.user?.id ?? null, req.user?.name ?? null, action, entity, entityId ?? null, detail ?? null, stamp()]);
-// Closed months are frozen: no stock movements may be dated inside one.
+// Closed months are frozen: no stock movements may be dated inside or before one, or the next
+// month's opening would no longer match the frozen closing figures.
 async function assertOpen(date) {
   const month = String(date).slice(0, 7);
-  if (await db.get('SELECT 1 FROM closed_months WHERE month=?', [month])) fail(`${month} is closed; entries can't be added to it`);
+  const { last } = await db.get('SELECT MAX(month) last FROM closed_months');
+  if (last && month <= last) fail(`${last} is closed; entries can't be dated in or before it`);
+}
+// Takes stock out only if enough is left at that moment, so simultaneous issues can't go negative.
+async function takeStock(t, itemId, qty) {
+  if (!(await t.get('UPDATE items SET quantity=quantity-? WHERE id=? AND quantity>=? RETURNING id', [qty, itemId, qty]))) {
+    const it = await t.get('SELECT name,quantity FROM items WHERE id=?', [itemId]);
+    fail(it ? `${it.name}: only ${it.quantity} in stock` : 'Item not found');
+  }
 }
 
 // Email the alert recipients when an item first drops to (or below) its minimum level.
@@ -48,47 +69,69 @@ async function notifyLow(itemId, before) {
   } catch (e) { console.error('low-stock alert failed:', e.message); }
 }
 
+const SESSION_DAYS = 30;
+const daysAgo = (n) => stamp(new Date(Date.now() - n * 864e5));
+const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, office: u.office, must_change_password: !!u.must_change_password });
+
 const auth = wrap(async (req, res, next) => {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
-  const user = token && await db.get('SELECT u.id,u.name,u.email,u.role,u.office FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?', [token]);
+  const user = token && await db.get(`SELECT u.id,u.name,u.email,u.role,u.office,u.must_change_password FROM sessions s JOIN users u ON u.id=s.user_id
+    WHERE s.token=? AND s.created_at > ? AND u.approved`, [token, daysAgo(SESSION_DAYS)]);
   if (!user) return bad(res, 'Unauthorized', 401);
-  req.user = user; req.token = token; next();
+  req.user = user; req.token = token;
+  // Until the default/reset password is replaced, only the account endpoints work.
+  if (user.must_change_password && !['/me', '/me/password', '/logout'].includes(req.path)) return bad(res, 'Change your password to continue', 403);
+  next();
 });
 const admin = (req, res, next) => (req.user.role === 'admin' ? next() : bad(res, 'Admin only', 403));
-const manager = (req, res, next) => (['admin', 'manager'].includes(req.user.role) ? next() : bad(res, 'Manager or admin only', 403));
+const employee = (req, res, next) => (['admin', 'employee'].includes(req.user.role) ? next() : bad(res, 'Employee or admin only', 403));
+const staffOrAdmin = (req, res, next) => (['admin', 'staff'].includes(req.user.role) ? next() : bad(res, 'Staff or admin only', 403));
 
 app.get('/api/offices', wrap((req, res) => res.json(OFFICES)));
+// Failed logins are counted per email in the database (not memory), so the limit holds across serverless instances.
+const MAX_FAILURES = 5, LOCK_MINUTES = 15;
 app.post('/api/login', wrap(async (req, res) => {
   const { email = '', password = '', office = '' } = req.body;
-  const u = await db.get('SELECT * FROM users WHERE email=?', [email.trim().toLowerCase()]);
-  if (!u || !verifyPassword(password, u.password_hash)) return bad(res, 'Invalid email or password', 401);
-  if (u.office.toLowerCase() !== String(office).trim().toLowerCase()) return bad(res, 'You are not registered at the selected office', 401);
+  const em = email.trim().toLowerCase();
+  const since = stamp(new Date(Date.now() - LOCK_MINUTES * 6e4));
+  if ((await db.get('SELECT COUNT(*) n FROM login_failures WHERE email=? AND at > ?', [em, since])).n >= MAX_FAILURES)
+    return bad(res, `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes.`, 429);
+  const u = await db.get('SELECT * FROM users WHERE email=?', [em]);
+  if (!u || !verifyPassword(password, u.password_hash) || u.office.toLowerCase() !== String(office).trim().toLowerCase()) {
+    await db.run('INSERT INTO login_failures (email,at) VALUES (?,?)', [em, stamp()]);
+    return bad(res, 'Invalid email, password or office', 401);
+  }
+  if (!u.approved) return bad(res, 'Your account is waiting for an admin to approve it', 403);
+  await db.run('DELETE FROM login_failures WHERE email=? OR at < ?', [em, since]);
+  await db.run('DELETE FROM sessions WHERE created_at < ?', [daysAgo(SESSION_DAYS)]);
   const token = crypto.randomBytes(32).toString('hex');
-  await db.run('INSERT INTO sessions (token,user_id) VALUES (?,?)', [token, u.id]);
-  res.json({ token, user: { id: u.id, name: u.name, email: u.email, role: u.role, office: u.office } });
+  await db.run('INSERT INTO sessions (token,user_id,created_at) VALUES (?,?,?)', [token, u.id, stamp()]);
+  res.json({ token, user: publicUser(u) });
 }));
 
-app.post('/api/register', wrap(async (req, res) => {
+// Self sign-up creates a pending staff account; an admin approves it under Users before it can sign in.
+app.post('/api/register', registerLimiter, wrap(async (req, res) => {
   const { name = '', email = '', password = '', office = '' } = req.body;
   const em = email.trim().toLowerCase();
   if (!name.trim() || !em || password.length < 6) return bad(res, 'Name, email and a 6+ character password are required');
   if (!OFFICES.includes(office.trim())) return bad(res, 'Choose a valid office');
   if (await db.get('SELECT id FROM users WHERE email=?', [em])) return bad(res, 'An account with this email already exists');
-  const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office) VALUES (?,?,?,?,?)', [name.trim(), em, hashPassword(password), 'staff', office.trim()]);
-  const token = crypto.randomBytes(32).toString('hex');
-  await db.run('INSERT INTO sessions (token,user_id) VALUES (?,?)', [token, id]);
-  res.status(201).json({ token, user: { id, name: name.trim(), email: em, role: 'staff', office: office.trim() } });
+  const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office,approved) VALUES (?,?,?,?,?,FALSE)', [name.trim(), em, hashPassword(password), 'staff', office.trim()]);
+  await db.run('INSERT INTO audit_log (user_id,user_name,action,entity,entity_id,detail,created_at) VALUES (?,?,?,?,?,?,?)',
+    [null, name.trim(), 'register', 'user', id, `${em} (${office.trim()}), awaiting approval`, stamp()]);
+  res.status(202).json({ pending: true });
 }));
 
 app.use('/api', auth);
-app.get('/api/me', (req, res) => res.json(req.user));
+app.get('/api/me', (req, res) => res.json(publicUser(req.user)));
 app.post('/api/logout', wrap(async (req, res) => { await db.run('DELETE FROM sessions WHERE token=?', [req.token]); res.json({ ok: true }); }));
 app.post('/api/me/password', wrap(async (req, res) => {
   const { current_password = '', new_password = '' } = req.body;
   const u = await db.get('SELECT * FROM users WHERE id=?', [req.user.id]);
   if (!verifyPassword(current_password, u.password_hash)) return bad(res, 'Current password is incorrect');
   if (new_password.length < 6) return bad(res, 'New password must be at least 6 characters');
-  await db.run('UPDATE users SET password_hash=? WHERE id=?', [hashPassword(new_password), u.id]);
+  if (new_password === current_password) return bad(res, 'Choose a password different from the current one');
+  await db.run('UPDATE users SET password_hash=?, must_change_password=FALSE WHERE id=?', [hashPassword(new_password), u.id]);
   await db.run('DELETE FROM sessions WHERE user_id=? AND token<>?', [u.id, req.token]);
   await audit(req, 'password_change', 'user', u.id, u.email);
   res.json({ ok: true });
@@ -133,23 +176,22 @@ const ITEM_SQL = 'SELECT i.*,c.name category FROM items i LEFT JOIN categories c
 app.get('/api/items', wrap(async (req, res) => res.json(await db.all(`${ITEM_SQL} ORDER BY i.name`))));
 function itemFields(b) {
   const name = (b.name || '').trim();
-  const quantity = int(b.quantity), min = int(b.min_quantity || 0);
+  const quantity = b.quantity === '' || b.quantity == null ? NaN : Number(b.quantity), min = Number(b.min_quantity || 0);
   if (!name) return 'Name required';
-  if (!(quantity >= 0) || !(min >= 0)) return 'Quantities must be 0 or more';
+  if (!Number.isInteger(quantity) || !Number.isInteger(min) || quantity < 0 || min < 0) return 'Quantities must be whole numbers, 0 or more';
   const rate = b.rate === '' || b.rate == null ? null : Number(b.rate);
   if (rate !== null && !(rate >= 0)) return 'Rate must be 0 or more';
-  return { name, sku: (b.sku || '').trim() || null, category_id: b.category_id ? int(b.category_id) : null, quantity, min_quantity: min, location: b.location || null, notes: b.notes || null, unit: (b.unit || '').trim() || null, rate, vendor: (b.vendor || '').trim() || null, vendor_email: (b.vendor_email || '').trim() || null };
+  return { name, category_id: b.category_id ? int(b.category_id) : null, quantity, min_quantity: min, location: b.location || null, notes: b.notes || null, unit: (b.unit || '').trim() || null, rate, vendor: (b.vendor || '').trim() || null, vendor_email: (b.vendor_email || '').trim() || null };
 }
-app.post('/api/items', manager, wrap(async (req, res) => {
+app.post('/api/items', employee, wrap(async (req, res) => {
   const f = itemFields(req.body); if (typeof f === 'string') return bad(res, f);
-  f.sku = f.sku || await nextSku(f.category_id);
-  const id = await db.insert('INSERT INTO items (name,sku,category_id,quantity,min_quantity,location,notes,unit,rate,vendor,vendor_email) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [f.name, f.sku, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email]);
-  await audit(req, 'create', 'item', id, `${f.name} [${f.sku}] (opening qty ${f.quantity})`);
+  const id = await db.insert('INSERT INTO items (name,category_id,quantity,min_quantity,location,notes,unit,rate,vendor,vendor_email) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [f.name, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email]);
+  await audit(req, 'create', 'item', id, `${f.name} (opening qty ${f.quantity})`);
   res.status(201).json(await db.get(`${ITEM_SQL} WHERE i.id=?`, [id]));
 }));
 // Bulk import: rows are parsed in the browser (Excel/CSV/PDF); existing item names are skipped.
-app.post('/api/items/bulk', manager, wrap(async (req, res) => {
+app.post('/api/items/bulk', employee, wrap(async (req, res) => {
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
   if (!rows.length) return bad(res, 'No rows to import');
   if (rows.length > 2000) return bad(res, 'Import at most 2000 rows at a time');
@@ -167,42 +209,45 @@ app.post('/api/items/bulk', manager, wrap(async (req, res) => {
         if (!cats.has(cname.toLowerCase())) cats.set(cname.toLowerCase(), await db.insert('INSERT INTO categories (name) VALUES (?)', [cname]));
         f.category_id = cats.get(cname.toLowerCase());
       }
-      f.sku = f.sku || await nextSku(f.category_id);
-      const id = await db.insert('INSERT INTO items (name,sku,category_id,quantity,min_quantity,location,notes,unit,rate,vendor,vendor_email) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-        [f.name, f.sku, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email]);
+      const id = await db.insert('INSERT INTO items (name,category_id,quantity,min_quantity,location,notes,unit,rate,vendor,vendor_email) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        [f.name, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email]);
       names.add(f.name.toLowerCase()); created++;
-      await audit(req, 'create', 'item', id, `${f.name} [${f.sku}] (opening qty ${f.quantity}, bulk import)`);
+      await audit(req, 'create', 'item', id, `${f.name} (opening qty ${f.quantity}, bulk import)`);
     } catch (e) { errors.push(`${label}: ${e.message}`); }
   }
   res.json({ created, skipped, errors });
 }));
-app.put('/api/items/:id', manager, wrap(async (req, res) => {
+app.put('/api/items/:id', employee, wrap(async (req, res) => {
   const id = int(req.params.id);
   const f = itemFields(req.body); if (typeof f === 'string') return bad(res, f);
   const old = await db.get('SELECT * FROM items WHERE id=?', [id]);
   if (!old) return bad(res, 'Item not found', 404);
-  f.sku = f.sku || old.sku || await nextSku(f.category_id);
   const delta = f.quantity - old.quantity;
   if (delta) await assertOpen(today());
   await tx(async (t) => {
-    await t.run('UPDATE items SET name=?,sku=?,category_id=?,quantity=?,min_quantity=?,location=?,notes=?,unit=?,rate=?,vendor=?,vendor_email=? WHERE id=?',
-      [f.name, f.sku, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email, id]);
+    await t.run('UPDATE items SET name=?,category_id=?,quantity=?,min_quantity=?,location=?,notes=?,unit=?,rate=?,vendor=?,vendor_email=? WHERE id=?',
+      [f.name, f.category_id, f.quantity, f.min_quantity, f.location, f.notes, f.unit, f.rate, f.vendor, f.vendor_email, id]);
     // Quantity edits are recorded as adjustments so month reports stay reconcilable.
     if (delta) await t.run('INSERT INTO adjustments (item_id,delta,reason,note,created_by,created_at) VALUES (?,?,?,?,?,?)', [id, delta, 'Edited item', null, req.user.id, stamp()]);
   });
-  const changed = ['name', 'sku', 'category_id', 'quantity', 'min_quantity', 'location', 'unit', 'rate', 'vendor'].filter((k) => (old[k] ?? null) !== (f[k] ?? null)).map((k) => `${k}: ${old[k] ?? '-'} → ${f[k] ?? '-'}`);
+  const changed = ['name', 'category_id', 'quantity', 'min_quantity', 'location', 'unit', 'rate', 'vendor'].filter((k) => (old[k] ?? null) !== (f[k] ?? null)).map((k) => `${k}: ${old[k] ?? '-'} → ${f[k] ?? '-'}`);
   await audit(req, 'update', 'item', id, `${old.name}: ${changed.join('; ') || 'no field changes'}`);
   res.json(await db.get(`${ITEM_SQL} WHERE i.id=?`, [id]));
 }));
 app.delete('/api/items/:id', admin, wrap(async (req, res) => {
   const old = await db.get('SELECT name,quantity FROM items WHERE id=?', [int(req.params.id)]);
+  // Deleting would cascade away purchases, issues and adjustments and silently change open-month reports.
+  const used = await db.get(`SELECT 1 FROM issues WHERE item_id=? UNION ALL SELECT 1 FROM purchases WHERE item_id=?
+    UNION ALL SELECT 1 FROM adjustments WHERE item_id=? UNION ALL SELECT 1 FROM requests WHERE item_id=?
+    UNION ALL SELECT 1 FROM po_lines WHERE item_id=? LIMIT 1`, Array(5).fill(int(req.params.id)));
+  if (used) return bad(res, `${old?.name || 'This item'} has stock history, so it can't be deleted. Adjust its quantity to 0 instead.`);
   await db.run('DELETE FROM items WHERE id=?', [int(req.params.id)]);
   await audit(req, 'delete', 'item', int(req.params.id), old ? `${old.name} (qty ${old.quantity})` : null);
   res.json({ ok: true });
 }));
 
 const REASONS = ['Damage', 'Loss', 'Recount', 'Expired', 'Other'];
-app.post('/api/items/:id/adjust', manager, wrap(async (req, res) => {
+app.post('/api/items/:id/adjust', employee, wrap(async (req, res) => {
   const id = int(req.params.id), delta = int(req.body.delta), reason = req.body.reason;
   if (!Number.isInteger(delta) || delta === 0) return bad(res, 'Enter a non-zero adjustment');
   if (!REASONS.includes(reason)) return bad(res, 'Choose a reason');
@@ -214,7 +259,7 @@ app.post('/api/items/:id/adjust', manager, wrap(async (req, res) => {
     await t.run('UPDATE items SET quantity=quantity+? WHERE id=?', [delta, id]);
     await t.run('INSERT INTO adjustments (item_id,delta,reason,note,created_by,created_at) VALUES (?,?,?,?,?,?)', [id, delta, reason, req.body.note || null, req.user.id, stamp()]);
   });
-  if (delta < 0) notifyLow(id, item.quantity);
+  if (delta < 0) await notifyLow(id, item.quantity);
   await audit(req, 'adjust', 'item', id, `${item.name}: ${delta > 0 ? '+' : ''}${delta} (${reason})${req.body.note ? ' - ' + req.body.note : ''}`);
   res.json({ ok: true });
 }));
@@ -228,9 +273,9 @@ function paymentFields(b) {
   if (method === 'Razorpay' && !ref) return 'Enter the Razorpay payment ID';
   return { method, ref: method === 'Cash' ? null : ref };
 }
-app.get('/api/purchases', wrap(async (req, res) => res.json(await db.all(
+app.get('/api/purchases', employee, wrap(async (req, res) => res.json(await db.all(
   'SELECT p.*,i.name item_name,i.unit FROM purchases p JOIN items i ON i.id=p.item_id ORDER BY p.purchased_at DESC, p.id DESC'))));
-app.post('/api/purchases', manager, wrap(async (req, res) => {
+app.post('/api/purchases', employee, wrap(async (req, res) => {
   const itemId = int(req.body.item_id), qty = int(req.body.quantity), rate = Number(req.body.rate);
   const date = req.body.purchased_at || today();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return bad(res, 'Invalid date');
@@ -257,7 +302,7 @@ const PO_SQL = `SELECT o.*, u.name created_by_name,
   (SELECT COALESCE(SUM(l.quantity*l.rate),0) FROM po_lines l WHERE l.po_id=o.id) total,
   (SELECT COUNT(*) FROM po_lines l WHERE l.po_id=o.id) line_count
   FROM purchase_orders o LEFT JOIN users u ON u.id=o.created_by`;
-const poLines = (id, ex = db) => ex.all('SELECT l.*, i.name item_name, i.sku, i.unit FROM po_lines l JOIN items i ON i.id=l.item_id WHERE l.po_id=? ORDER BY l.id', [id]);
+const poLines = (id, ex = db) => ex.all('SELECT l.*, i.name item_name, i.unit FROM po_lines l JOIN items i ON i.id=l.item_id WHERE l.po_id=? ORDER BY l.id', [id]);
 async function createPo(t, { vendor, vendor_email, notes, lines }, userId) {
   const id = await t.insert('INSERT INTO purchase_orders (vendor,vendor_email,notes,created_by,created_at) VALUES (?,?,?,?,?)', [vendor, vendor_email || null, notes || null, userId, stamp()]);
   const poNo = `PO-${stamp().slice(0, 4)}-${String(id).padStart(4, '0')}`;
@@ -265,14 +310,14 @@ async function createPo(t, { vendor, vendor_email, notes, lines }, userId) {
   for (const l of lines) await t.run('INSERT INTO po_lines (po_id,item_id,quantity,rate) VALUES (?,?,?,?)', [id, l.item_id, l.quantity, l.rate]);
   return { id, poNo };
 }
-app.get('/api/mail-status', manager, wrap((req, res) => res.json({ configured: mailReady() })));
-app.get('/api/purchase-orders', manager, wrap(async (req, res) => res.json(await db.all(`${PO_SQL} ORDER BY o.id DESC`))));
-app.get('/api/purchase-orders/:id', manager, wrap(async (req, res) => {
+app.get('/api/mail-status', employee, wrap((req, res) => res.json({ configured: mailReady() })));
+app.get('/api/purchase-orders', employee, wrap(async (req, res) => res.json(await db.all(`${PO_SQL} ORDER BY o.id DESC`))));
+app.get('/api/purchase-orders/:id', employee, wrap(async (req, res) => {
   const po = await db.get(`${PO_SQL} WHERE o.id=?`, [int(req.params.id)]);
   if (!po) return bad(res, 'Not found', 404);
   res.json({ ...po, lines: await poLines(po.id) });
 }));
-app.post('/api/purchase-orders', manager, wrap(async (req, res) => {
+app.post('/api/purchase-orders', employee, wrap(async (req, res) => {
   const vendor = (req.body.vendor || '').trim();
   if (!vendor) return bad(res, 'Vendor is required');
   const lines = [];
@@ -289,7 +334,7 @@ app.post('/api/purchase-orders', manager, wrap(async (req, res) => {
   res.status(201).json({ id, po_no: poNo });
 }));
 // One draft PO per vendor for every item at/below its minimum level that isn't already on an open PO.
-app.post('/api/purchase-orders/from-low-stock', manager, wrap(async (req, res) => {
+app.post('/api/purchase-orders/from-low-stock', employee, wrap(async (req, res) => {
   const low = await db.all(`SELECT i.* FROM items i WHERE i.min_quantity > 0 AND i.quantity <= i.min_quantity
     AND NOT EXISTS (SELECT 1 FROM po_lines l JOIN purchase_orders o ON o.id=l.po_id WHERE l.item_id=i.id AND o.status IN ('draft','sent')) ORDER BY i.vendor, i.name`);
   const byVendor = new Map();
@@ -308,10 +353,11 @@ app.post('/api/purchase-orders/from-low-stock', manager, wrap(async (req, res) =
   }
   res.status(201).json({ created: made });
 }));
-app.post('/api/purchase-orders/:id/send', manager, wrap(async (req, res) => {
+app.post('/api/purchase-orders/:id/send', employee, wrap(async (req, res) => {
   const po = await db.get('SELECT * FROM purchase_orders WHERE id=?', [int(req.params.id)]);
   if (!po) return bad(res, 'Not found', 404);
   if (!['draft', 'sent'].includes(po.status)) return bad(res, `A ${po.status} order can't be sent`);
+  if (!mailReady()) return bad(res, 'Email is not configured on the server, so the PO can\'t be emailed', 503);
   const to = (req.body.email || po.vendor_email || '').trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return bad(res, 'Enter a valid vendor email address');
   const lines = await poLines(po.id);
@@ -320,7 +366,7 @@ app.post('/api/purchase-orders/:id/send', manager, wrap(async (req, res) => {
   await audit(req, 'send', 'purchase_order', po.id, `${po.po_no} emailed to ${to}`);
   res.json({ ok: true });
 }));
-app.post('/api/purchase-orders/:id/cancel', manager, wrap(async (req, res) => {
+app.post('/api/purchase-orders/:id/cancel', employee, wrap(async (req, res) => {
   const po = await db.get('SELECT * FROM purchase_orders WHERE id=?', [int(req.params.id)]);
   if (!po) return bad(res, 'Not found', 404);
   if (!['draft', 'sent'].includes(po.status)) return bad(res, `A ${po.status} order can't be cancelled`);
@@ -329,7 +375,7 @@ app.post('/api/purchase-orders/:id/cancel', manager, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 // Receiving a PO books each line as a purchase (stock in) with the payment details.
-app.post('/api/purchase-orders/:id/receive', manager, wrap(async (req, res) => {
+app.post('/api/purchase-orders/:id/receive', employee, wrap(async (req, res) => {
   const po = await db.get('SELECT * FROM purchase_orders WHERE id=?', [int(req.params.id)]);
   if (!po) return bad(res, 'Not found', 404);
   if (!['draft', 'sent'].includes(po.status)) return bad(res, `A ${po.status} order can't be received`);
@@ -349,9 +395,9 @@ app.post('/api/purchase-orders/:id/receive', manager, wrap(async (req, res) => {
 }));
 
 // Issues
-app.get('/api/issues', manager, wrap(async (req, res) => res.json(await db.all(
+app.get('/api/issues', employee, wrap(async (req, res) => res.json(await db.all(
   'SELECT s.*,i.name item_name,u.name issued_by_name FROM issues s JOIN items i ON i.id=s.item_id LEFT JOIN users u ON u.id=s.issued_by ORDER BY s.issued_at DESC, s.id DESC'))));
-app.post('/api/issues', manager, wrap(async (req, res) => {
+app.post('/api/issues', employee, wrap(async (req, res) => {
   const itemId = int(req.body.item_id), qty = int(req.body.quantity), to = (req.body.issued_to || '').trim();
   if (!to) return bad(res, 'Issued-to is required');
   if (!(qty > 0)) return bad(res, 'Quantity must be at least 1');
@@ -360,16 +406,16 @@ app.post('/api/issues', manager, wrap(async (req, res) => {
   if (item.quantity < qty) return bad(res, `Only ${item.quantity} in stock`);
   await assertOpen(today());
   await tx(async (t) => {
-    await t.run('UPDATE items SET quantity=quantity-? WHERE id=?', [qty, itemId]);
+    await takeStock(t, itemId, qty);
     await t.run('INSERT INTO issues (item_id,quantity,issued_to,department,event,issued_by,issued_at) VALUES (?,?,?,?,?,?,?)', [itemId, qty, to, req.body.department || null, req.body.event || null, req.user.id, stamp()]);
   });
-  notifyLow(itemId, item.quantity);
+  await notifyLow(itemId, item.quantity);
   await audit(req, 'issue', 'item', itemId, `${qty} × ${item.name} → ${to}`);
   res.status(201).json({ ok: true });
 }));
 
 // Daily entry: several consumed items for one person/event in one go.
-app.post('/api/issues/batch', manager, wrap(async (req, res) => {
+app.post('/api/issues/batch', employee, wrap(async (req, res) => {
   const { date = today(), issued_to = '', event = '', department = '', lines = [] } = req.body;
   const to = issued_to.trim();
   if (!to) return bad(res, 'Person name is required');
@@ -394,16 +440,16 @@ app.post('/api/issues/batch', manager, wrap(async (req, res) => {
   const when = `${date} 00:00:00`;
   await tx(async (t) => {
     for (const [id, q] of need) {
-      await t.run('UPDATE items SET quantity=quantity-? WHERE id=?', [q, id]);
+      await takeStock(t, id, q);
       await t.run('INSERT INTO issues (item_id,quantity,issued_to,department,event,issued_by,issued_at,returned_at,consumed) VALUES (?,?,?,?,?,?,?,?,1)',
         [id, q, to, department || null, event || null, req.user.id, when, when]);
     }
   });
-  for (const [id, it] of items) notifyLow(id, it.quantity);
+  for (const [id, it] of items) await notifyLow(id, it.quantity);
   await audit(req, 'consume', 'issue', null, `${date} ${to}${event ? ` (${event})` : ''}: ${[...need].map(([id, q]) => `${q} × ${items.get(id).name}`).join(', ')}`);
   res.status(201).json({ ok: true, count: need.size });
 }));
-app.post('/api/issues/:id/return', manager, wrap(async (req, res) => {
+app.post('/api/issues/:id/return', employee, wrap(async (req, res) => {
   const iss = await db.get('SELECT s.*,i.name item_name FROM issues s JOIN items i ON i.id=s.item_id WHERE s.id=?', [int(req.params.id)]);
   if (!iss) return bad(res, 'Not found', 404);
   if (iss.consumed) return bad(res, 'Consumed items cannot be returned');
@@ -417,12 +463,12 @@ app.post('/api/issues/:id/return', manager, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// Staff requests: staff ask for items, managers fulfil (which issues the stock) or reject.
+// Staff requests: staff ask for items, employees fulfil (which issues the stock) or reject.
 const REQ_SQL = `SELECT r.*, i.name item_name, i.quantity stock, u.name requester_name, u.office requester_office, rb.name resolved_by_name,
   (SELECT COUNT(*) FROM queries q WHERE q.request_id=r.id AND q.status='open') open_queries
   FROM requests r JOIN items i ON i.id=r.item_id LEFT JOIN users u ON u.id=r.requested_by LEFT JOIN users rb ON rb.id=r.resolved_by`;
-const isMgr = (u) => u.role === 'admin' || u.role === 'manager';
-app.get('/api/requests', wrap(async (req, res) => res.json(isMgr(req.user)
+const isEmployee = (u) => u.role === 'admin' || u.role === 'employee';
+app.get('/api/requests', wrap(async (req, res) => res.json(isEmployee(req.user)
   ? await db.all(`${REQ_SQL} ORDER BY r.id DESC`)
   : await db.all(`${REQ_SQL} WHERE r.requested_by=? ORDER BY r.id DESC`, [req.user.id])))); 
 app.post('/api/requests', wrap(async (req, res) => {
@@ -441,7 +487,7 @@ app.post('/api/requests/:id/cancel', wrap(async (req, res) => {
   await db.run(`UPDATE requests SET status='cancelled', resolved_at=? WHERE id=?`, [stamp(), r.id]);
   res.json({ ok: true });
 }));
-app.post('/api/requests/:id/fulfill', manager, wrap(async (req, res) => {
+app.post('/api/requests/:id/fulfill', employee, wrap(async (req, res) => {
   const r = await db.get(`${REQ_SQL} WHERE r.id=?`, [int(req.params.id)]);
   if (!r) return bad(res, 'Not found', 404);
   if (r.status !== 'pending') return bad(res, 'Request is not pending');
@@ -449,15 +495,16 @@ app.post('/api/requests/:id/fulfill', manager, wrap(async (req, res) => {
   await assertOpen(today());
   await tx(async (t) => {
     const now = stamp();
-    await t.run('UPDATE items SET quantity=quantity-? WHERE id=?', [r.quantity, r.item_id]);
-    const issueId = await t.insert('INSERT INTO issues (item_id,quantity,issued_to,department,issued_by,issued_at) VALUES (?,?,?,?,?,?)', [r.item_id, r.quantity, r.requester_name || 'Staff', r.requester_office || null, req.user.id, now]);
+    await takeStock(t, r.item_id, r.quantity);
+    // Requested items are handed over for use, not lent, so they're recorded as consumed (not "on loan").
+    const issueId = await t.insert('INSERT INTO issues (item_id,quantity,issued_to,department,issued_by,issued_at,returned_at,consumed) VALUES (?,?,?,?,?,?,?,1)', [r.item_id, r.quantity, r.requester_name || 'Staff', r.requester_office || null, req.user.id, now, now]);
     await t.run(`UPDATE requests SET status='fulfilled', resolved_by=?, resolved_at=?, issue_id=? WHERE id=?`, [req.user.id, now, issueId, r.id]);
   });
-  notifyLow(r.item_id, r.stock);
+  await notifyLow(r.item_id, r.stock);
   await audit(req, 'issue', 'item', r.item_id, `${r.quantity} × ${r.item_name} → ${r.requester_name} (request #${r.id})`);
   res.json({ ok: true });
 }));
-app.post('/api/requests/:id/reject', manager, wrap(async (req, res) => {
+app.post('/api/requests/:id/reject', employee, wrap(async (req, res) => {
   const r = await db.get('SELECT * FROM requests WHERE id=?', [int(req.params.id)]);
   if (!r) return bad(res, 'Not found', 404);
   if (r.status !== 'pending') return bad(res, 'Request is not pending');
@@ -466,12 +513,12 @@ app.post('/api/requests/:id/reject', manager, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// Queries: the requester says a fulfilled item was not received; a manager responds.
+// Queries: the requester says a fulfilled item was not received; an employee responds.
 app.get('/api/queries', wrap(async (req, res) => {
   const sql = `SELECT q.*, r.quantity, i.name item_name, u.name raised_by_name, rb.name resolved_by_name
     FROM queries q JOIN requests r ON r.id=q.request_id JOIN items i ON i.id=r.item_id
     LEFT JOIN users u ON u.id=q.raised_by LEFT JOIN users rb ON rb.id=q.resolved_by`;
-  res.json(isMgr(req.user) ? await db.all(`${sql} ORDER BY q.id DESC`) : await db.all(`${sql} WHERE q.raised_by=? ORDER BY q.id DESC`, [req.user.id]));
+  res.json(isEmployee(req.user) ? await db.all(`${sql} ORDER BY q.id DESC`) : await db.all(`${sql} WHERE q.raised_by=? ORDER BY q.id DESC`, [req.user.id]));
 }));
 app.post('/api/requests/:id/query', wrap(async (req, res) => {
   const r = await db.get('SELECT * FROM requests WHERE id=?', [int(req.params.id)]);
@@ -484,12 +531,52 @@ app.post('/api/requests/:id/query', wrap(async (req, res) => {
   await audit(req, 'query', 'request', r.id, message);
   res.status(201).json({ id });
 }));
-app.post('/api/queries/:id/resolve', manager, wrap(async (req, res) => {
+app.post('/api/queries/:id/resolve', employee, wrap(async (req, res) => {
   const q = await db.get('SELECT * FROM queries WHERE id=?', [int(req.params.id)]);
   if (!q) return bad(res, 'Not found', 404);
   if (q.status !== 'open') return bad(res, 'Already resolved');
   await db.run(`UPDATE queries SET status='resolved', response=?, resolved_by=?, resolved_at=? WHERE id=?`, [(req.body.response || '').trim() || null, req.user.id, stamp(), q.id]);
   await audit(req, 'resolve_query', 'request', q.request_id, req.body.response || null);
+  res.json({ ok: true });
+}));
+
+// Service/maintenance complaints: an employee (or admin) raises one with a note and/or a photo;
+// staff (or admin) see them all and close them out by attaching a photo of the fix.
+const blobReady = () => !!process.env.BLOB_READ_WRITE_TOKEN;
+const photoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+app.post('/api/maintenance/upload', (req, res, next) => (blobReady() ? next() : bad(res, 'Photo storage is not configured on the server', 503)),
+  photoUpload.single('photo'), wrap(async (req, res) => {
+    if (!req.file) return bad(res, 'No photo provided');
+    if (!/^image\//.test(req.file.mimetype)) return bad(res, 'Only image files are allowed');
+    const ext = (req.file.mimetype.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
+    const blob = await put(`maintenance/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`, req.file.buffer, { access: 'public', contentType: req.file.mimetype });
+    res.json({ url: blob.url });
+  }));
+const MT_SQL = `SELECT t.*, u.name raised_by_name, u.office raised_by_office, rb.name resolved_by_name
+  FROM maintenance_tickets t LEFT JOIN users u ON u.id=t.raised_by LEFT JOIN users rb ON rb.id=t.resolved_by`;
+app.get('/api/maintenance', wrap(async (req, res) => {
+  const canSeeAll = ['admin', 'staff'].includes(req.user.role);
+  res.json(canSeeAll
+    ? await db.all(`${MT_SQL} ORDER BY (t.status='open') DESC, t.id DESC`)
+    : await db.all(`${MT_SQL} WHERE t.raised_by=? ORDER BY (t.status='open') DESC, t.id DESC`, [req.user.id]));
+}));
+app.post('/api/maintenance', employee, wrap(async (req, res) => {
+  const note = (req.body.note || '').trim() || null, photoUrl = (req.body.photo_url || '').trim() || null;
+  if (!note && !photoUrl) return bad(res, 'Add a note or a photo describing the complaint');
+  const id = await db.insert('INSERT INTO maintenance_tickets (note,photo_url,raised_by,raised_at) VALUES (?,?,?,?)', [note, photoUrl, req.user.id, stamp()]);
+  await audit(req, 'create', 'maintenance_ticket', id, note || '(photo only)');
+  res.status(201).json({ id });
+}));
+app.post('/api/maintenance/:id/resolve', staffOrAdmin, wrap(async (req, res) => {
+  const t = await db.get('SELECT * FROM maintenance_tickets WHERE id=?', [int(req.params.id)]);
+  if (!t) return bad(res, 'Not found', 404);
+  if (t.status !== 'open') return bad(res, 'Already resolved');
+  const photoUrl = (req.body.resolution_photo_url || '').trim();
+  if (!photoUrl) return bad(res, 'Attach a photo showing the fix to close this complaint');
+  const note = (req.body.resolution_note || '').trim() || null;
+  await db.run(`UPDATE maintenance_tickets SET status='resolved', resolution_photo_url=?, resolution_note=?, resolved_by=?, resolved_at=? WHERE id=?`,
+    [photoUrl, note, req.user.id, stamp(), t.id]);
+  await audit(req, 'resolve', 'maintenance_ticket', t.id, note || null);
   res.json({ ok: true });
 }));
 
@@ -505,7 +592,7 @@ app.get('/api/reports/:month/export', wrap(async (req, res) => {
   await wb.xlsx.write(res);
   res.end();
 }));
-app.post('/api/reports/:month/close', manager, wrap(async (req, res) => {
+app.post('/api/reports/:month/close', employee, wrap(async (req, res) => {
   const month = monthParam(req);
   if (month > today().slice(0, 7)) return bad(res, "Can't close a future month");
   if (await db.get('SELECT 1 FROM closed_months WHERE month=?', [month])) return bad(res, 'Already closed');
@@ -513,7 +600,7 @@ app.post('/api/reports/:month/close', manager, wrap(async (req, res) => {
   await audit(req, 'close_month', 'month', null, `${month}: ${n} items frozen`);
   res.json({ ok: true });
 }));
-app.delete('/api/reports/:month/close', manager, wrap(async (req, res) => {
+app.delete('/api/reports/:month/close', employee, wrap(async (req, res) => {
   const month = monthParam(req);
   const c = await db.get('SELECT * FROM closed_months WHERE month=?', [month]);
   if (!c) return bad(res, 'Month is not closed');
@@ -542,13 +629,44 @@ app.get('/api/audit', admin, wrap(async (req, res) => {
 }));
 
 // Users
-app.get('/api/users', admin, wrap(async (req, res) => res.json(await db.all('SELECT id,name,email,role,office FROM users ORDER BY name'))));
+const ROLES = ['admin', 'employee', 'staff'];
+app.get('/api/users', admin, wrap(async (req, res) => res.json(await db.all('SELECT id,name,email,role,office,approved FROM users ORDER BY approved, name'))));
+app.post('/api/users/:id/approve', admin, wrap(async (req, res) => {
+  const u = await db.get('SELECT * FROM users WHERE id=?', [int(req.params.id)]);
+  if (!u) return bad(res, 'User not found', 404);
+  if (u.approved) return bad(res, 'Already approved');
+  const role = req.body.role || u.role;
+  if (!ROLES.includes(role)) return bad(res, 'Invalid role');
+  await db.run('UPDATE users SET approved=TRUE, role=? WHERE id=?', [role, u.id]);
+  await audit(req, 'approve', 'user', u.id, `${u.email} as ${role}`);
+  res.json({ ok: true });
+}));
+app.put('/api/users/:id/role', admin, wrap(async (req, res) => {
+  const id = int(req.params.id), role = req.body.role;
+  if (!ROLES.includes(role)) return bad(res, 'Invalid role');
+  if (id === req.user.id) return bad(res, "You can't change your own role");
+  const u = await db.get('SELECT email,role FROM users WHERE id=?', [id]);
+  if (!u) return bad(res, 'User not found', 404);
+  await db.run('UPDATE users SET role=? WHERE id=?', [role, id]);
+  await audit(req, 'role_change', 'user', id, `${u.email}: ${u.role} → ${role}`);
+  res.json({ ok: true });
+}));
+app.put('/api/users/:id/office', admin, wrap(async (req, res) => {
+  const id = int(req.params.id), office = (req.body.office || '').trim();
+  if (!OFFICES.includes(office)) return bad(res, 'Choose a valid office');
+  const u = await db.get('SELECT email,office FROM users WHERE id=?', [id]);
+  if (!u) return bad(res, 'User not found', 404);
+  await db.run('UPDATE users SET office=? WHERE id=?', [office, id]);
+  await audit(req, 'office_change', 'user', id, `${u.email}: ${u.office} → ${office}`);
+  res.json({ ok: true });
+}));
 app.post('/api/users', admin, wrap(async (req, res) => {
   const { name = '', email = '', password = '', role = 'staff', office = '' } = req.body;
   if (!name.trim() || !email.trim() || password.length < 6) return bad(res, 'Name, email and a 6+ character password are required');
-  if (!['admin', 'manager', 'staff'].includes(role)) return bad(res, 'Invalid role');
+  if (!ROLES.includes(role)) return bad(res, 'Invalid role');
   if (!OFFICES.includes(office.trim())) return bad(res, 'Choose a valid office');
-  const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office) VALUES (?,?,?,?,?)', [name.trim(), email.trim().toLowerCase(), hashPassword(password), role, office.trim()]);
+  // The admin chose this password, so the user replaces it at first sign-in.
+  const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office,must_change_password) VALUES (?,?,?,?,?,TRUE)', [name.trim(), email.trim().toLowerCase(), hashPassword(password), role, office.trim()]);
   await audit(req, 'create', 'user', id, `${email.trim().toLowerCase()} (${role}, ${office.trim()})`);
   res.status(201).json({ ok: true });
 }));
@@ -557,7 +675,7 @@ app.post('/api/users/:id/password', admin, wrap(async (req, res) => {
   if (password.length < 6) return bad(res, 'Password must be at least 6 characters');
   const u = await db.get('SELECT email FROM users WHERE id=?', [id]);
   if (!u) return bad(res, 'User not found', 404);
-  await db.run('UPDATE users SET password_hash=? WHERE id=?', [hashPassword(password), id]);
+  await db.run('UPDATE users SET password_hash=?, must_change_password=TRUE WHERE id=?', [hashPassword(password), id]);
   await db.run('DELETE FROM sessions WHERE user_id=?', [id]);
   await audit(req, 'password_reset', 'user', id, u.email);
   res.json({ ok: true });

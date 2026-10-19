@@ -32,7 +32,7 @@ export default function Requests({ canManage }) {
       <div className="page-head reveal">
         <div>
           <span className="label">Tracking</span><h1>{canManage ? 'Item requests' : 'My requests'}</h1>
-          <p>{canManage ? 'Fulfil staff requests to issue the stock, or reject them.' : 'Request items; a manager will hand them over.'}</p>
+          <p>{canManage ? 'Fulfil staff requests to issue the stock, or reject them.' : 'Request items; an employee will hand them over.'}</p>
         </div>
         <button className="btn primary" onClick={() => open({ type: 'new', item_id: '', quantity: 1, note: '' })}><PackagePlus /> Request item</button>
       </div>

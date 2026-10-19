@@ -23,3 +23,16 @@ export const api = {
   put: (u, b) => request('PUT', u, b),
   del: (u) => request('DELETE', u),
 };
+
+// Photo uploads go through multipart/form-data, not the JSON helper above.
+export async function uploadPhoto(url, file) {
+  const fd = new FormData();
+  fd.append('photo', file);
+  const res = await fetch(url, { method: 'POST', headers: { ...(getToken() && { Authorization: `Bearer ${getToken()}` }) }, body: fd });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    if (res.status === 401) { setToken(null); window.location.reload(); }
+    throw new Error(data?.error || 'Upload failed');
+  }
+  return data;
+}

@@ -67,7 +67,7 @@ export default function Insights() {
               <tbody>
                 {vendors.map((v) => re.rows.filter((r) => r.vendor === v).map((r) => (
                   <tr key={r.id}>
-                    <td><strong>{r.name}</strong>{r.sku && <span className="label"> {r.sku}</span>}</td><td>{r.vendor}</td>
+                    <td><strong>{r.name}</strong></td><td>{r.vendor}</td>
                     <td><span className={`badge ${r.quantity === 0 ? 'red' : ''}`}>{r.quantity}</span></td>
                     <td>{r.avgMonthly || '—'}</td>
                     <td>{r.coverMonths === null ? '—' : `${r.coverMonths} mo`}</td>
