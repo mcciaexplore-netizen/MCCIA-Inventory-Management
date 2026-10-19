@@ -2,8 +2,6 @@ import express from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import cors from 'cors';
-import multer from 'multer';
-import { put } from '@vercel/blob';
 import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
@@ -543,15 +541,34 @@ app.post('/api/queries/:id/resolve', employee, wrap(async (req, res) => {
 // Service/maintenance complaints: an employee (or admin) raises one with a note and/or a photo;
 // staff (or admin) see them all and close them out by attaching a photo of the fix.
 const blobReady = () => !!process.env.BLOB_READ_WRITE_TOKEN;
-const photoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
-app.post('/api/maintenance/upload', (req, res, next) => (blobReady() ? next() : bad(res, 'Photo storage is not configured on the server', 503)),
-  photoUpload.single('photo'), wrap(async (req, res) => {
-    if (!req.file) return bad(res, 'No photo provided');
-    if (!/^image\//.test(req.file.mimetype)) return bad(res, 'Only image files are allowed');
+// multer/@vercel/blob are loaded lazily, only for this one route: if either package fails to load
+// (version mismatch, bundler quirk) that failure stays contained here instead of crashing the whole app.
+let photoUpload;
+app.post('/api/maintenance/upload', wrap(async (req, res, next) => {
+  if (!blobReady()) return bad(res, 'Photo storage is not configured on the server', 503);
+  if (!photoUpload) {
+    try {
+      const { default: multer } = await import('multer');
+      photoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+    } catch (e) {
+      console.error('Photo upload unavailable, multer failed to load:', e.message);
+      return bad(res, 'Photo upload is temporarily unavailable', 503);
+    }
+  }
+  photoUpload.single('photo')(req, res, (err) => err ? next(err) : next());
+}), wrap(async (req, res) => {
+  if (!req.file) return bad(res, 'No photo provided');
+  if (!/^image\//.test(req.file.mimetype)) return bad(res, 'Only image files are allowed');
+  try {
+    const { put } = await import('@vercel/blob');
     const ext = (req.file.mimetype.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
     const blob = await put(`maintenance/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`, req.file.buffer, { access: 'public', contentType: req.file.mimetype });
     res.json({ url: blob.url });
-  }));
+  } catch (e) {
+    console.error('Blob upload failed:', e.message);
+    bad(res, 'Photo upload failed, please try again', 502);
+  }
+}));
 const MT_SQL = `SELECT t.*, u.name raised_by_name, u.office raised_by_office, rb.name resolved_by_name
   FROM maintenance_tickets t LEFT JOIN users u ON u.id=t.raised_by LEFT JOIN users rb ON rb.id=t.resolved_by`;
 app.get('/api/maintenance', wrap(async (req, res) => {

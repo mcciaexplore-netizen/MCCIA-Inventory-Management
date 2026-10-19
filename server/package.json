@@ -2,6 +2,7 @@
   "name": "mccia-inventory-server",
   "version": "1.0.0",
   "type": "module",
+  "engines": { "node": ">=20.0.0" },
   "scripts": {
     "build": "npm install --prefix ../client --include=dev && npm run build --prefix ../client",
     "start": "node index.js",
