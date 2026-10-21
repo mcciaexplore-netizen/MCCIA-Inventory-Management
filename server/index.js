@@ -6,6 +6,7 @@ import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
 import { alertRecipients, lowStockEmail, mailReady, poEmail, sendMail } from './mail.js';
+import { buildPoDocx } from './poDocument.js';
 
 const app = express();
 app.set('trust proxy', 1); // behind Vercel's proxy: req.ip must read the real client IP, not the proxy's.
@@ -145,18 +146,44 @@ app.get('/api/dashboard', wrap(async (req, res) => {
   });
 }));
 
-// Categories
+// Categories (read-only: items are grouped by category for filtering/reporting, but there is no
+// dedicated management UI — new categories arrive via item creation or spreadsheet import).
 app.get('/api/categories', wrap(async (req, res) => res.json(await db.all('SELECT c.*,(SELECT COUNT(*) FROM items WHERE category_id=c.id) item_count FROM categories c ORDER BY name'))));
-app.post('/api/categories', admin, wrap(async (req, res) => {
-  const name = (req.body.name || '').trim(); if (!name) return bad(res, 'Name required');
-  const id = await db.insert('INSERT INTO categories (name) VALUES (?)', [name]);
-  await audit(req, 'create', 'category', id, name);
+
+// Vendors: a reusable address book (name, email, address, GSTIN, PAN) for filling in purchase orders.
+app.get('/api/vendors', wrap(async (req, res) => res.json(await db.all('SELECT * FROM vendors ORDER BY name'))));
+app.post('/api/vendors', employee, wrap(async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return bad(res, 'Name is required');
+  const { email, address, gstin, pan } = req.body;
+  const id = await db.insert('INSERT INTO vendors (name,email,address,gstin,pan) VALUES (?,?,?,?,?)', [name, email || null, address || null, gstin || null, pan || null]);
+  await audit(req, 'create', 'vendor', id, name);
   res.status(201).json({ id, name });
 }));
-app.delete('/api/categories/:id', admin, wrap(async (req, res) => {
-  const c = await db.get('SELECT name FROM categories WHERE id=?', [int(req.params.id)]);
-  await db.run('DELETE FROM categories WHERE id=?', [int(req.params.id)]);
-  await audit(req, 'delete', 'category', int(req.params.id), c?.name);
+app.post('/api/vendors/bulk', employee, wrap(async (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  if (!rows.length) return bad(res, 'No rows to import');
+  if (rows.length > 2000) return bad(res, 'Import at most 2000 rows at a time');
+  const names = new Set((await db.all('SELECT name FROM vendors')).map((r) => r.name.trim().toLowerCase()));
+  let created = 0; const skipped = [], errors = [];
+  for (const [n, r] of rows.entries()) {
+    const name = String(r.name || '').trim();
+    const label = `Row ${n + 1}${name ? ` (${name})` : ''}`;
+    try {
+      if (!name) { errors.push(`${label}: Name is required`); continue; }
+      if (names.has(name.toLowerCase())) { skipped.push(name); continue; }
+      const id = await db.insert('INSERT INTO vendors (name,email,address,gstin,pan) VALUES (?,?,?,?,?)',
+        [name, r.email || null, r.address || null, r.gstin || null, r.pan || null]);
+      names.add(name.toLowerCase()); created++;
+      await audit(req, 'create', 'vendor', id, `${name} (bulk import)`);
+    } catch (e) { errors.push(`${label}: ${e.message}`); }
+  }
+  res.json({ created, skipped, errors });
+}));
+app.delete('/api/vendors/:id', admin, wrap(async (req, res) => {
+  const v = await db.get('SELECT name FROM vendors WHERE id=?', [int(req.params.id)]);
+  await db.run('DELETE FROM vendors WHERE id=?', [int(req.params.id)]);
+  await audit(req, 'delete', 'vendor', int(req.params.id), v?.name);
   res.json({ ok: true });
 }));
 
@@ -289,8 +316,11 @@ const PO_SQL = `SELECT o.*, u.name created_by_name,
   (SELECT COUNT(*) FROM po_lines l WHERE l.po_id=o.id) line_count
   FROM purchase_orders o LEFT JOIN users u ON u.id=o.created_by`;
 const poLines = (id, ex = db) => ex.all('SELECT l.*, i.name item_name, i.unit FROM po_lines l JOIN items i ON i.id=l.item_id WHERE l.po_id=? ORDER BY l.id', [id]);
-async function createPo(t, { vendor, vendor_email, notes, lines }, userId) {
-  const id = await t.insert('INSERT INTO purchase_orders (vendor,vendor_email,notes,created_by,created_at) VALUES (?,?,?,?,?)', [vendor, vendor_email || null, notes || null, userId, stamp()]);
+async function createPo(t, { vendor, vendor_email, vendor_address, vendor_gstin, vendor_pan, notes, lines }, userId) {
+  const id = await t.insert(
+    'INSERT INTO purchase_orders (vendor,vendor_email,vendor_address,vendor_gstin,vendor_pan,notes,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)',
+    [vendor, vendor_email || null, vendor_address || null, vendor_gstin || null, vendor_pan || null, notes || null, userId, stamp()],
+  );
   const poNo = `PO-${stamp().slice(0, 4)}-${String(id).padStart(4, '0')}`;
   await t.run('UPDATE purchase_orders SET po_no=? WHERE id=?', [poNo, id]);
   for (const l of lines) await t.run('INSERT INTO po_lines (po_id,item_id,quantity,rate) VALUES (?,?,?,?)', [id, l.item_id, l.quantity, l.rate]);
@@ -302,6 +332,17 @@ app.get('/api/purchase-orders/:id', employee, wrap(async (req, res) => {
   const po = await db.get(`${PO_SQL} WHERE o.id=?`, [int(req.params.id)]);
   if (!po) return bad(res, 'Not found', 404);
   res.json({ ...po, lines: await poLines(po.id) });
+}));
+// Generates the PO letter as a .docx on demand (not stored) so it always reflects the current record.
+app.get('/api/purchase-orders/:id/document', employee, wrap(async (req, res) => {
+  const po = await db.get(`${PO_SQL} WHERE o.id=?`, [int(req.params.id)]);
+  if (!po) return bad(res, 'Not found', 404);
+  const buffer = await buildPoDocx(po, await poLines(po.id));
+  res.set({
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'Content-Disposition': `attachment; filename="${po.po_no}.docx"`,
+  });
+  res.send(buffer);
 }));
 app.post('/api/purchase-orders', employee, wrap(async (req, res) => {
   const vendor = (req.body.vendor || '').trim();
@@ -398,40 +439,6 @@ app.post('/api/issues', employee, wrap(async (req, res) => {
   res.status(201).json({ ok: true });
 }));
 
-// Daily entry: several consumed items for one person/event in one go.
-app.post('/api/issues/batch', employee, wrap(async (req, res) => {
-  const { date = today(), issued_to = '', event = '', department = '', lines = [] } = req.body;
-  const to = issued_to.trim();
-  if (!to) return bad(res, 'Person name is required');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return bad(res, 'Invalid date');
-  if (date > today()) return bad(res, "Date can't be in the future");
-  const need = new Map();
-  for (const l of lines) {
-    const id = int(l.item_id), q = int(l.quantity);
-    if (!id && !l.quantity) continue;
-    if (!id || !(q > 0)) return bad(res, 'Each line needs an item and a quantity of at least 1');
-    need.set(id, (need.get(id) || 0) + q);
-  }
-  if (!need.size) return bad(res, 'Add at least one item');
-  const items = new Map();
-  for (const [id, q] of need) {
-    const it = await db.get('SELECT * FROM items WHERE id=?', [id]);
-    if (!it) return bad(res, 'Item not found', 404);
-    if (it.quantity < q) return bad(res, `${it.name}: only ${it.quantity} in stock`);
-    items.set(id, it);
-  }
-  const when = `${date} 00:00:00`;
-  await tx(async (t) => {
-    for (const [id, q] of need) {
-      await takeStock(t, id, q);
-      await t.run('INSERT INTO issues (item_id,quantity,issued_to,department,event,issued_by,issued_at,returned_at,consumed) VALUES (?,?,?,?,?,?,?,?,1)',
-        [id, q, to, department || null, event || null, req.user.id, when, when]);
-    }
-  });
-  for (const [id, it] of items) await notifyLow(id, it.quantity);
-  await audit(req, 'consume', 'issue', null, `${date} ${to}${event ? ` (${event})` : ''}: ${[...need].map(([id, q]) => `${q} × ${items.get(id).name}`).join(', ')}`);
-  res.status(201).json({ ok: true, count: need.size });
-}));
 app.post('/api/issues/:id/return', employee, wrap(async (req, res) => {
   const iss = await db.get('SELECT s.*,i.name item_name FROM issues s JOIN items i ON i.id=s.item_id WHERE s.id=?', [int(req.params.id)]);
   if (!iss) return bad(res, 'Not found', 404);

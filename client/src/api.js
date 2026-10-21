@@ -24,6 +24,25 @@ export const api = {
   del: (u) => request('DELETE', u),
 };
 
+// Downloads a binary response (e.g. a generated PO document) and saves it as a local file.
+export async function downloadFile(url, filename) {
+  const res = await fetch(url, { headers: { ...(getToken() && { Authorization: `Bearer ${getToken()}` }) } });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    if (res.status === 401) { setToken(null); window.location.reload(); }
+    throw new Error(data?.error || 'Download failed');
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
 // Photo uploads go through multipart/form-data, not the JSON helper above.
 export async function uploadPhoto(url, file) {
   const fd = new FormData();

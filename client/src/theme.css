@@ -160,8 +160,3 @@ tbody tr { transition: background var(--ease-sm); } tbody tr:hover { background:
 
 .logo { display: block; width: auto; object-fit: contain; }
 .po-print table { width: 100%; }
-@media print {
-  body * { visibility: hidden; }
-  .po-print, .po-print * { visibility: visible; }
-  .po-print { position: absolute; left: 0; top: 0; width: 100%; }
-}

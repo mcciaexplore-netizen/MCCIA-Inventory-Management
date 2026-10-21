@@ -133,6 +133,13 @@ CREATE TABLE IF NOT EXISTS po_lines (
   id SERIAL PRIMARY KEY, po_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
   item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE, quantity INTEGER NOT NULL, rate DOUBLE PRECISION NOT NULL DEFAULT 0
 );
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS vendor_address TEXT;
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS vendor_gstin TEXT;
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS vendor_pan TEXT;
+CREATE TABLE IF NOT EXISTS vendors (
+  id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, email TEXT, address TEXT, gstin TEXT, pan TEXT,
+  created_at TEXT DEFAULT ${NOW_IST}
+);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS login_failures (email TEXT NOT NULL, at TEXT NOT NULL);
@@ -201,17 +208,3 @@ if (!(await db.get('SELECT 1 FROM users LIMIT 1'))) {
 const seeded = await db.get(`SELECT id,password_hash FROM users WHERE email='admin@mccia.local' AND NOT must_change_password`);
 if (seeded && verifyPassword('admin123', seeded.password_hash)) await db.run('UPDATE users SET must_change_password=TRUE WHERE id=?', [seeded.id]);
 
-if (EMBEDDED && !(await db.get('SELECT 1 FROM items LIMIT 1'))) {
-  const cat = async (n) => (await db.get('SELECT id FROM categories WHERE name=?', [n])).id;
-  const sample = [
-    ['Natraj Pen', 'Stationery', 'Nos', 5, 120, 30, 'Natraj Stationers'], ['A4 Paper Ream', 'Stationery', 'Ream', 260, 40, 10, 'Natraj Stationers'],
-    ['White Board Marker', 'Stationery', 'Nos', 18, 8, 10, 'Natraj Stationers'], ['HDMI Cable', 'IT Equipment', 'Nos', 350, 6, 2, 'Digital Hub'],
-    ['Wireless Mouse', 'IT Equipment', 'Nos', 650, 3, 4, 'Digital Hub'], ['Phenyl 5L', 'Housekeeping', 'Can', 480, 12, 3, 'Clean Co'],
-  ];
-  for (const [name, c, unit, rate, quantity, min, vendor] of sample) {
-    const id = await db.insert('INSERT INTO items (name,category_id,quantity,min_quantity,unit,rate,vendor) VALUES (?,?,?,?,?,?,?)',
-      [name, await cat(c), quantity, min, unit, rate, vendor]);
-    await db.run('INSERT INTO issues (item_id,quantity,issued_to,event,issued_at,returned_at,consumed) VALUES (?,?,?,?,?,?,1)', [id, 5, 'Front Desk', 'Daily use', stamp(), stamp()]);
-  }
-  console.log('Loaded sample items.');
-}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Ban, FilePlus2, PackageCheck, Printer, Send, TriangleAlert } from 'lucide-react';
-import { api } from '../api.js';
+import { Ban, FileDown, FilePlus2, PackageCheck, Send, TriangleAlert } from 'lucide-react';
+import { api, downloadFile } from '../api.js';
 import { Alert, Field, Modal, fmtDate } from '../components/ui.jsx';
 
 const STATUS = { draft: '', sent: '', received: 'green', cancelled: 'red' };
@@ -10,13 +10,14 @@ const blankLine = () => ({ item_id: '', quantity: 1, rate: '' });
 export default function PurchaseOrders() {
   const [orders, setOrders] = useState([]);
   const [items, setItems] = useState([]);
+  const [vendors, setVendors] = useState([]);
   const [mail, setMail] = useState(true);
   const [modal, setModal] = useState(null); // {type:'new'|'view'|'send'|'receive', ...}
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
 
-  const load = () => Promise.all([api.get('/api/purchase-orders'), api.get('/api/items'), api.get('/api/mail-status')])
-    .then(([o, i, m]) => { setOrders(o); setItems(i); setMail(m.configured); }).catch((e) => setError(e.message));
+  const load = () => Promise.all([api.get('/api/purchase-orders'), api.get('/api/items'), api.get('/api/mail-status'), api.get('/api/vendors')])
+    .then(([o, i, m, v]) => { setOrders(o); setItems(i); setMail(m.configured); setVendors(v); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
   const open = (m) => { setError(''); setModal(m); };
@@ -28,6 +29,7 @@ export default function PurchaseOrders() {
   async function view(id) {
     try { open({ type: 'view', ...(await api.get(`/api/purchase-orders/${id}`)) }); } catch (err) { setError(err.message); }
   }
+  const viewDocument = (id, poNo) => downloadFile(`/api/purchase-orders/${id}/document`, `${poNo}.docx`).catch((err) => setError(err.message));
   const lowCount = items.filter((i) => i.min_quantity > 0 && i.quantity <= i.min_quantity).length;
 
   const setLine = (n, k) => (e) => setModal({ ...modal, lines: modal.lines.map((l, i) => {
@@ -50,7 +52,7 @@ export default function PurchaseOrders() {
             const r = await api.post('/api/purchase-orders/from-low-stock');
             setNote(r.created.length ? `Drafted ${r.created.join(', ')}` : 'No new low-stock items need ordering');
           })}><TriangleAlert /> Draft POs for low stock{lowCount ? ` (${lowCount})` : ''}</button>
-          <button className="btn primary" onClick={() => open({ type: 'new', vendor: '', vendor_email: '', notes: '', lines: [blankLine()] })}><FilePlus2 /> New PO</button>
+          <button className="btn primary" onClick={() => open({ type: 'new', vendor: '', vendor_email: '', vendor_address: '', vendor_gstin: '', vendor_pan: '', notes: '', lines: [blankLine()] })}><FilePlus2 /> New PO</button>
         </div>
       </div>
       {!modal && <Alert>{error}</Alert>}
@@ -66,7 +68,10 @@ export default function PurchaseOrders() {
                 <tr key={o.id}>
                   <td><strong>{o.po_no}</strong></td><td>{o.vendor}</td><td>{fmtDate(o.created_at)}</td><td>{o.line_count}</td><td>{inr(o.total)}</td>
                   <td><span className={`badge ${STATUS[o.status]}`}>{o.status}</span></td>
-                  <td className="actions"><button className="btn ghost sm" onClick={() => view(o.id)}>Open</button></td>
+                  <td className="actions">
+                    <button className="btn ghost sm" onClick={() => view(o.id)}>Open</button>
+                    <button className="btn ghost sm" onClick={() => viewDocument(o.id, o.po_no)}><FileDown /> View PO</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -79,9 +84,27 @@ export default function PurchaseOrders() {
         <Modal title="New purchase order" onClose={close}>
           <form onSubmit={(e) => { e.preventDefault(); run(() => api.post('/api/purchase-orders', modal), 'Purchase order drafted'); }}>
             <Alert>{error}</Alert>
+            {vendors.length > 0 && (
+              <Field label="Pick a saved vendor">
+                <select value="" onChange={(e) => {
+                  const v = vendors.find((x) => String(x.id) === e.target.value);
+                  if (v) setModal({ ...modal, vendor: v.name, vendor_email: v.email || '', vendor_address: v.address || '', vendor_gstin: v.gstin || '', vendor_pan: v.pan || '' });
+                }}>
+                  <option value="">Select a vendor to fill in the details below…</option>
+                  {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              </Field>
+            )}
             <div className="form-row">
               <Field label="Vendor"><input required value={modal.vendor} onChange={set('vendor')} /></Field>
               <Field label="Vendor email"><input type="email" value={modal.vendor_email} onChange={set('vendor_email')} /></Field>
+            </div>
+            <div className="form-row">
+              <Field label="Vendor address (for the PO document)"><input value={modal.vendor_address} onChange={set('vendor_address')} /></Field>
+            </div>
+            <div className="form-row">
+              <Field label="Vendor GSTIN"><input value={modal.vendor_gstin} onChange={set('vendor_gstin')} /></Field>
+              <Field label="Vendor PAN"><input value={modal.vendor_pan} onChange={set('vendor_pan')} /></Field>
             </div>
             {modal.lines.map((l, n) => (
               <div className="form-row" key={n}>
@@ -106,7 +129,10 @@ export default function PurchaseOrders() {
         <Modal title={`Purchase order ${modal.po_no}`} onClose={close}>
           <div className="po-print">
             <img src="/logo.png" alt="MCCIA" style={{ height: 48 }} />
-            <p>To: <strong>{modal.vendor}</strong>{modal.vendor_email && <> · {modal.vendor_email}</>}<br />Date: {fmtDate(modal.created_at)} · Status: {modal.status}</p>
+            <p>To: <strong>{modal.vendor}</strong>{modal.vendor_email && <> · {modal.vendor_email}</>}<br />
+              {modal.vendor_address && <>{modal.vendor_address}<br /></>}
+              {(modal.vendor_gstin || modal.vendor_pan) && <>{[modal.vendor_gstin && `GSTIN/UIN: ${modal.vendor_gstin}`, modal.vendor_pan && `PAN: ${modal.vendor_pan}`].filter(Boolean).join('    ')}<br /></>}
+              Date: {fmtDate(modal.created_at)} · Status: {modal.status}</p>
             <table>
               <thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate ₹</th><th>Amount ₹</th></tr></thead>
               <tbody>
@@ -118,7 +144,7 @@ export default function PurchaseOrders() {
           </div>
           <Alert>{error}</Alert>
           <div className="modal-actions">
-            <button className="btn ghost" onClick={() => window.print()}><Printer /> Print</button>
+            <button className="btn ghost" onClick={() => viewDocument(modal.id, modal.po_no)}><FileDown /> View PO</button>
             {['draft', 'sent'].includes(modal.status) && <>
               <button className="btn ghost" onClick={() => run(() => api.post(`/api/purchase-orders/${modal.id}/cancel`), 'Order cancelled')}><Ban /> Cancel PO</button>
               <button className="btn ghost" disabled={!mail} onClick={() => open({ ...modal, type: 'send', email: modal.vendor_email || '' })}><Send /> Email vendor</button>

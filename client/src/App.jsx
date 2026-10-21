@@ -1,17 +1,16 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { ClipboardList, FileText, FolderTree, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
+import { FileText, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, Truck, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
 import { api, getToken, setToken } from './api.js';
 const PurchaseOrders = lazy(() => import('./pages/PurchaseOrders.jsx'));
 const Requests = lazy(() => import('./pages/Requests.jsx'));
 import Login from './pages/Login.jsx';
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
 const Items = lazy(() => import('./pages/Items.jsx'));
-const Categories = lazy(() => import('./pages/Categories.jsx'));
+const Vendors = lazy(() => import('./pages/Vendors.jsx'));
 const Issues = lazy(() => import('./pages/Issues.jsx'));
 const Users = lazy(() => import('./pages/Users.jsx'));
 const Purchases = lazy(() => import('./pages/Purchases.jsx'));
-const Entry = lazy(() => import('./pages/Entry.jsx'));
 const Audit = lazy(() => import('./pages/Audit.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
 const Maintenance = lazy(() => import('./pages/Maintenance.jsx'));
@@ -59,13 +58,12 @@ export default function App() {
         <nav className="nav">
           <NavLink to="/" end><LayoutDashboard /> Dashboard</NavLink>
           <NavLink to="/items"><Package /> Items</NavLink>
-          {canManage && <NavLink to="/entry"><ClipboardList /> Daily Entry</NavLink>}
           {canManage && <NavLink to="/issues"><HandHelping /> Issue / Return</NavLink>}
           <NavLink to="/requests"><HandHelping /> {canManage ? "Requests" : "My Requests"}</NavLink>
           {canManage && <NavLink to="/purchases"><PackagePlus /> Purchases</NavLink>}
           {canManage && <NavLink to="/orders"><FileText /> Purchase Orders</NavLink>}
+          {canManage && <NavLink to="/vendors"><Truck /> Vendors</NavLink>}
           <NavLink to="/maintenance"><Wrench /> Maintenance</NavLink>
-          {isAdmin && <NavLink to="/categories"><FolderTree /> Categories</NavLink>}
           {isAdmin && <NavLink to="/users"><UsersIcon /> Users</NavLink>}
           {isAdmin && <NavLink to="/audit"><History /> Audit Log</NavLink>}
         </nav>
@@ -83,12 +81,11 @@ export default function App() {
           <Route path="/issues" element={canManage ? <Issues /> : <Navigate to="/" />} />
           <Route path="/orders" element={canManage ? <PurchaseOrders /> : <Navigate to="/" />} />
           <Route path="/requests" element={<Requests canManage={canManage} />} />
-          <Route path="/entry" element={canManage ? <Entry /> : <Navigate to="/" />} />
           <Route path="/maintenance" element={<Maintenance user={user} />} />
           <Route path="/purchases" element={canManage ? <Purchases /> : <Navigate to="/" />} />
+          <Route path="/vendors" element={canManage ? <Vendors isAdmin={isAdmin} /> : <Navigate to="/" />} />
           <Route path="/audit" element={isAdmin ? <Audit /> : <Navigate to="/" />} />
           <Route path="/account" element={<Account user={user} />} />
-          <Route path="/categories" element={isAdmin ? <Categories /> : <Navigate to="/" />} />
           <Route path="/users" element={isAdmin ? <Users me={user} /> : <Navigate to="/" />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>

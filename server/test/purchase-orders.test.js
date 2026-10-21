@@ -53,4 +53,24 @@ describe('purchase order lifecycle', () => {
     const res = await auth(request(app).post(`/api/purchase-orders/${created.body.id}/receive`), employee.token).send({ payment_method: 'Razorpay' });
     expect(res.status).toBe(400);
   });
+
+  it('generates a downloadable .docx document for a PO', async () => {
+    const employee = await loginAs({ role: 'employee' });
+    const item = await createItem({ quantity: 5, rate: 10 });
+    const created = await auth(request(app).post('/api/purchase-orders'), employee.token)
+      .send({ vendor: 'Circle Furniture', vendor_address: '18 Longitude Commercial Complex, Punawale, Pune 411033', vendor_gstin: '27AAQFC1443D1ZN', vendor_pan: 'AAQFC1443D', lines: [{ item_id: item.id, quantity: 2, rate: 19800 }] });
+    expect(created.status).toBe(201);
+
+    const doc = await auth(request(app).get(`/api/purchase-orders/${created.body.id}/document`), employee.token);
+    expect(doc.status).toBe(200);
+    expect(doc.headers['content-type']).toContain('wordprocessingml.document');
+    expect(doc.headers['content-disposition']).toContain(`${created.body.po_no}.docx`);
+    expect(Number(doc.headers['content-length'])).toBeGreaterThan(0);
+  });
+
+  it('404s when downloading the document for a PO that does not exist', async () => {
+    const employee = await loginAs({ role: 'employee' });
+    const res = await auth(request(app).get('/api/purchase-orders/999999/document'), employee.token);
+    expect(res.status).toBe(404);
+  });
 });

@@ -63,24 +63,6 @@ describe('forced password change', () => {
 });
 
 describe('role-gated routes', () => {
-  it('rejects a staff user creating a category (admin only)', async () => {
-    const staff = await loginAs({ role: 'staff' });
-    const res = await auth(request(app).post('/api/categories'), staff.token).send({ name: 'Nope' });
-    expect(res.status).toBe(403);
-  });
-
-  it('rejects an employee creating a category (admin only)', async () => {
-    const employee = await loginAs({ role: 'employee' });
-    const res = await auth(request(app).post('/api/categories'), employee.token).send({ name: 'Nope' });
-    expect(res.status).toBe(403);
-  });
-
-  it('allows an admin to create a category', async () => {
-    const admin = await loginAs({ role: 'admin' });
-    const res = await auth(request(app).post('/api/categories'), admin.token).send({ name: `Cat ${Date.now()}` });
-    expect(res.status).toBe(201);
-  });
-
   it('rejects a staff user creating an item (employee/admin only)', async () => {
     const staff = await loginAs({ role: 'staff' });
     const res = await auth(request(app).post('/api/items'), staff.token).send({ name: 'Pen', quantity: 1 });

@@ -50,13 +50,21 @@ export const FIELDS = [
   { key: 'notes', label: 'Notes', match: /note|remark/ },
 ];
 
+export const VENDOR_FIELDS = [
+  { key: 'name', label: 'Vendor name', required: true, match: /^(vendor|supplier|name|company)/ },
+  { key: 'email', label: 'Email', match: /e-?mail/ },
+  { key: 'address', label: 'Address', match: /address/ },
+  { key: 'gstin', label: 'GSTIN', match: /gst/ },
+  { key: 'pan', label: 'PAN', match: /\bpan\b/ },
+];
+
 // Finds the header row (most recognised column titles in the first 15 rows) and guesses the mapping.
-export function guessLayout(grid) {
+export function guessLayout(grid, fields = FIELDS) {
   let best = { row: 0, score: -1, map: {} };
   grid.slice(0, 15).forEach((cells, row) => {
     const map = {};
     cells.forEach((c, i) => {
-      const f = FIELDS.find((x) => !(x.key in map) && x.match.test(c.toLowerCase()));
+      const f = fields.find((x) => !(x.key in map) && x.match.test(c.toLowerCase()));
       if (f) map[f.key] = i;
     });
     const score = Object.keys(map).length;
@@ -65,17 +73,17 @@ export function guessLayout(grid) {
   return { header: best.row, map: best.map };
 }
 
-export function buildRows(grid, header, map) {
+export function buildRows(grid, header, map, fields = FIELDS) {
   const out = [];
   for (const cells of grid.slice(header + 1)) {
     const r = {};
-    for (const f of FIELDS) {
+    for (const f of fields) {
       const i = map[f.key];
       if (i == null || i === '') continue;
       const v = String(cells[i] ?? '').trim();
       r[f.key] = ['rate', 'quantity', 'min_quantity'].includes(f.key) ? v.replace(/[₹,\s]/g, '') : v;
     }
-    r.quantity = r.quantity || '0';
+    if (fields.some((f) => f.key === 'quantity')) r.quantity = r.quantity || '0';
     if (r.name && !/^total/i.test(r.name)) out.push(r);
   }
   return out;
