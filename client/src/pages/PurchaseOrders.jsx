@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Ban, FileDown, FilePlus2, PackageCheck, Send, TriangleAlert } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Ban, FileDown, FilePlus2, Image as ImageIcon, PackageCheck, Send, TriangleAlert } from 'lucide-react';
 import { api, downloadFile } from '../api.js';
 import { Alert, Field, Modal, fmtDate } from '../components/ui.jsx';
 
@@ -11,25 +11,46 @@ export default function PurchaseOrders() {
   const [orders, setOrders] = useState([]);
   const [items, setItems] = useState([]);
   const [vendors, setVendors] = useState([]);
+  const [org, setOrg] = useState(null);
   const [mail, setMail] = useState(true);
   const [modal, setModal] = useState(null); // {type:'new'|'view'|'send'|'receive', ...}
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
+  const [preview, setPreview] = useState(null); // data URL of the rendered PO image
+  const [capturing, setCapturing] = useState(false);
+  const poRef = useRef(null);
 
-  const load = () => Promise.all([api.get('/api/purchase-orders'), api.get('/api/items'), api.get('/api/mail-status'), api.get('/api/vendors')])
-    .then(([o, i, m, v]) => { setOrders(o); setItems(i); setMail(m.configured); setVendors(v); }).catch((e) => setError(e.message));
+  const load = () => Promise.all([api.get('/api/purchase-orders'), api.get('/api/items'), api.get('/api/mail-status'), api.get('/api/vendors'), api.get('/api/org')])
+    .then(([o, i, m, v, g]) => { setOrders(o); setItems(i); setMail(m.configured); setVendors(v); setOrg(g); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
-  const open = (m) => { setError(''); setModal(m); };
-  const close = () => setModal(null);
+  const open = (m) => { setError(''); setPreview(null); setModal(m); };
+  const close = () => { setPreview(null); setModal(null); };
   async function run(fn, msg) {
     setError(''); setNote('');
     try { await fn(); close(); if (msg) setNote(msg); load(); } catch (err) { setError(err.message); }
   }
-  async function view(id) {
-    try { open({ type: 'view', ...(await api.get(`/api/purchase-orders/${id}`)) }); } catch (err) { setError(err.message); }
+  async function view(id, autoImage) {
+    try {
+      open({ type: 'view', ...(await api.get(`/api/purchase-orders/${id}`)) });
+      if (autoImage) setTimeout(captureImage, 0);
+    } catch (err) { setError(err.message); }
   }
   const viewDocument = (id, poNo) => downloadFile(`/api/purchase-orders/${id}/document`, `${poNo}.docx`).catch((err) => setError(err.message));
+  async function captureImage() {
+    if (!poRef.current) return;
+    setError(''); setCapturing(true);
+    try {
+      const { default: html2canvas } = await import('html2canvas');
+      const canvas = await html2canvas(poRef.current, { backgroundColor: '#ffffff', scale: 2 });
+      setPreview(canvas.toDataURL('image/png'));
+    } catch (err) { setError(`Could not render the PO as an image: ${err.message}`); }
+    setCapturing(false);
+  }
+  function downloadPreview() {
+    const a = document.createElement('a');
+    a.href = preview; a.download = `${modal.po_no}.png`; document.body.appendChild(a); a.click(); a.remove();
+  }
   const lowCount = items.filter((i) => i.min_quantity > 0 && i.quantity <= i.min_quantity).length;
 
   const setLine = (n, k) => (e) => setModal({ ...modal, lines: modal.lines.map((l, i) => {
@@ -69,8 +90,7 @@ export default function PurchaseOrders() {
                   <td><strong>{o.po_no}</strong></td><td>{o.vendor}</td><td>{fmtDate(o.created_at)}</td><td>{o.line_count}</td><td>{inr(o.total)}</td>
                   <td><span className={`badge ${STATUS[o.status]}`}>{o.status}</span></td>
                   <td className="actions">
-                    <button className="btn ghost sm" onClick={() => view(o.id)}>Open</button>
-                    <button className="btn ghost sm" onClick={() => viewDocument(o.id, o.po_no)}><FileDown /> View PO</button>
+                    <button className="btn ghost sm" onClick={() => view(o.id, true)}><ImageIcon /> View PO</button>
                   </td>
                 </tr>
               ))}
@@ -127,12 +147,13 @@ export default function PurchaseOrders() {
 
       {modal?.type === 'view' && (
         <Modal title={`Purchase order ${modal.po_no}`} onClose={close}>
-          <div className="po-print">
+          <div className="po-print" ref={poRef} style={{ background: '#fff', padding: 16 }}>
             <img src="/logo.png" alt="MCCIA" style={{ height: 48 }} />
             <p>To: <strong>{modal.vendor}</strong>{modal.vendor_email && <> · {modal.vendor_email}</>}<br />
               {modal.vendor_address && <>{modal.vendor_address}<br /></>}
               {(modal.vendor_gstin || modal.vendor_pan) && <>{[modal.vendor_gstin && `GSTIN/UIN: ${modal.vendor_gstin}`, modal.vendor_pan && `PAN: ${modal.vendor_pan}`].filter(Boolean).join('    ')}<br /></>}
               Date: {fmtDate(modal.created_at)} · Status: {modal.status}</p>
+            <p>Dear Sir,<br />Please refer to mentioned details for providing the items below. (1) Details of work &amp; rates:</p>
             <table>
               <thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate ₹</th><th>Amount ₹</th></tr></thead>
               <tbody>
@@ -141,10 +162,16 @@ export default function PurchaseOrders() {
               </tbody>
             </table>
             {modal.notes && <p>{modal.notes}</p>}
+            {org && <>
+              <p style={{ marginBottom: 4 }}><strong>Terms &amp; Conditions:</strong></p>
+              {org.terms.map((t, i) => <p key={i} style={{ margin: '2px 0' }}>({i + 1}) {t}</p>)}
+              <p>Regards,<br /><strong>{org.signatory}</strong><br />{org.signatoryTitle} ({org.name} GSTIN: {org.gstin})</p>
+            </>}
           </div>
           <Alert>{error}</Alert>
           <div className="modal-actions">
-            <button className="btn ghost" onClick={() => viewDocument(modal.id, modal.po_no)}><FileDown /> View PO</button>
+            <button className="btn ghost" disabled={capturing} onClick={captureImage}><ImageIcon /> {capturing ? 'Rendering…' : 'View as image'}</button>
+            <button className="btn ghost" onClick={() => viewDocument(modal.id, modal.po_no)}><FileDown /> Download PO (Word)</button>
             {['draft', 'sent'].includes(modal.status) && <>
               <button className="btn ghost" onClick={() => run(() => api.post(`/api/purchase-orders/${modal.id}/cancel`), 'Order cancelled')}><Ban /> Cancel PO</button>
               <button className="btn ghost" disabled={!mail} onClick={() => open({ ...modal, type: 'send', email: modal.vendor_email || '' })}><Send /> Email vendor</button>
@@ -152,6 +179,18 @@ export default function PurchaseOrders() {
             </>}
           </div>
         </Modal>
+      )}
+
+      {preview && (
+        <div className="backdrop" style={{ zIndex: 60 }} onMouseDown={(e) => e.target === e.currentTarget && setPreview(null)}>
+          <div className="modal" style={{ maxWidth: 720, textAlign: 'center' }}>
+            <img src={preview} alt={`${modal?.po_no} preview`} style={{ maxWidth: '100%', border: '1px solid var(--border)', borderRadius: 8 }} />
+            <div className="modal-actions" style={{ justifyContent: 'center', marginTop: 12 }}>
+              <button className="btn ghost" onClick={() => setPreview(null)}>Close</button>
+              <button className="btn primary" onClick={downloadPreview}><FileDown /> Download image</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {modal?.type === 'send' && (

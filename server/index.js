@@ -5,8 +5,8 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
-import { alertRecipients, lowStockEmail, mailReady, poEmail, sendMail } from './mail.js';
-import { buildPoDocx } from './poDocument.js';
+import { ORG, alertRecipients, lowStockEmail, mailReady, poEmail, sendMail } from './mail.js';
+import { MCCIA_GSTIN, PO_SIGNATORY, PO_SIGNATORY_TITLE, TERMS, buildPoDocx } from './poDocument.js';
 
 const app = express();
 app.set('trust proxy', 1); // behind Vercel's proxy: req.ip must read the real client IP, not the proxy's.
@@ -327,6 +327,8 @@ async function createPo(t, { vendor, vendor_email, vendor_address, vendor_gstin,
   return { id, poNo };
 }
 app.get('/api/mail-status', employee, wrap((req, res) => res.json({ configured: mailReady() })));
+// Letterhead details for rendering a PO preview client-side (kept in sync with the generated .docx).
+app.get('/api/org', employee, wrap((req, res) => res.json({ name: ORG, gstin: MCCIA_GSTIN, signatory: PO_SIGNATORY, signatoryTitle: PO_SIGNATORY_TITLE, terms: TERMS })));
 app.get('/api/purchase-orders', employee, wrap(async (req, res) => res.json(await db.all(`${PO_SQL} ORDER BY o.id DESC`))));
 app.get('/api/purchase-orders/:id', employee, wrap(async (req, res) => {
   const po = await db.get(`${PO_SQL} WHERE o.id=?`, [int(req.params.id)]);

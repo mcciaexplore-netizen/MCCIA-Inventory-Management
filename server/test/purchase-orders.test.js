@@ -73,4 +73,15 @@ describe('purchase order lifecycle', () => {
     const res = await auth(request(app).get('/api/purchase-orders/999999/document'), employee.token);
     expect(res.status).toBe(404);
   });
+
+  it('exposes the letterhead details used to render the PO preview and document', async () => {
+    const employee = await loginAs({ role: 'employee' });
+    const res = await auth(request(app).get('/api/org'), employee.token);
+    expect(res.status).toBe(200);
+    expect(res.body.name).toMatch(/MCCIA/);
+    expect(res.body.gstin).toBeTruthy();
+    expect(res.body.signatory).toBeTruthy();
+    expect(Array.isArray(res.body.terms)).toBe(true);
+    expect(res.body.terms.length).toBeGreaterThan(0);
+  });
 });
