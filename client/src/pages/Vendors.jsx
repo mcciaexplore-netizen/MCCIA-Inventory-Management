@@ -11,6 +11,7 @@ export default function Vendors({ isAdmin }) {
   const [form, setForm] = useState(blank);
   const [error, setError] = useState('');
   const [imp, setImp] = useState(null);
+  const [showForm, setShowForm] = useState(false);
   const load = () => api.get('/api/vendors').then(setVendors).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
@@ -18,7 +19,7 @@ export default function Vendors({ isAdmin }) {
 
   async function add(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/api/vendors', form); setForm(blank); load(); } catch (err) { setError(err.message); }
+    try { await api.post('/api/vendors', form); setForm(blank); setShowForm(false); load(); } catch (err) { setError(err.message); }
   }
   async function remove(v) {
     if (!confirm(`Delete vendor "${v.name}"?`)) return;
@@ -46,21 +47,12 @@ export default function Vendors({ isAdmin }) {
     <>
       <div className="page-head reveal">
         <div><span className="label">Purchasing</span><h1>Vendors</h1><p>Keep vendor contact and tax details on hand for drafting purchase orders.</p></div>
-        <label className="btn ghost" style={{ cursor: 'pointer' }}><Upload /> Import file<input type="file" accept=".xlsx,.xls,.csv,.pdf" hidden onChange={pickFile} /></label>
+        <div style={{ display: 'flex', gap: '.5rem' }}>
+          <label className="btn ghost" style={{ cursor: 'pointer' }}><Upload /> Import file<input type="file" accept=".xlsx,.xls,.csv,.pdf" hidden onChange={pickFile} /></label>
+          <button type="button" className="btn primary" onClick={() => { setForm(blank); setShowForm(true); }}><Plus /> Add vendor</button>
+        </div>
       </div>
-      {!imp && <Alert>{error}</Alert>}
-      <form className="card reveal" onSubmit={add}>
-        <div className="form-row">
-          <Field label="Name"><input required value={form.name} onChange={set('name')} /></Field>
-          <Field label="Email"><input type="email" value={form.email} onChange={set('email')} /></Field>
-        </div>
-        <Field label="Address"><input value={form.address} onChange={set('address')} /></Field>
-        <div className="form-row">
-          <Field label="GSTIN"><input value={form.gstin} onChange={set('gstin')} /></Field>
-          <Field label="PAN"><input value={form.pan} onChange={set('pan')} /></Field>
-        </div>
-        <div className="modal-actions" style={{ justifyContent: 'flex-end' }}><button className="btn primary"><Plus /> Add vendor</button></div>
-      </form>
+      {!imp && !showForm && <Alert>{error}</Alert>}
       <div className="card flush reveal" style={{ '--i': 1 }}>
         <div className="table-wrap">
           <table>
@@ -77,6 +69,26 @@ export default function Vendors({ isAdmin }) {
           {vendors.length === 0 && <div className="empty">No vendors yet.</div>}
         </div>
       </div>
+      {showForm && (
+        <Modal title="Add vendor" onClose={() => setShowForm(false)}>
+          <Alert>{error}</Alert>
+          <form onSubmit={add}>
+            <div className="form-row">
+              <Field label="Name"><input required value={form.name} onChange={set('name')} /></Field>
+              <Field label="Email"><input type="email" value={form.email} onChange={set('email')} /></Field>
+            </div>
+            <Field label="Address"><input value={form.address} onChange={set('address')} /></Field>
+            <div className="form-row">
+              <Field label="GSTIN"><input value={form.gstin} onChange={set('gstin')} /></Field>
+              <Field label="PAN"><input value={form.pan} onChange={set('pan')} /></Field>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setShowForm(false)}>Cancel</button>
+              <button className="btn primary"><Plus /> Add vendor</button>
+            </div>
+          </form>
+        </Modal>
+      )}
       {imp && (() => {
         const rows = buildRows(imp.grid, imp.header, imp.map, VENDOR_FIELDS);
         const head = imp.grid[imp.header] || [];
