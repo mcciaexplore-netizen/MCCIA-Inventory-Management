@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, X } from 'lucide-react';
 
 export function Modal({ title, onClose, children }) {
