@@ -53,6 +53,7 @@ export default function App() {
         <div className="brand" style={{ padding: 0 }}><img src="/logo.png" alt="MCCIA" className="logo" style={{ height: 34 }} /></div>
         <button className="btn ghost sm" onClick={() => setOpen(!open)} aria-label="Menu">{open ? <X /> : <Menu />}</button>
       </div>
+      <div className={`drawer-backdrop ${open ? 'open' : ''}`} onClick={() => setOpen(false)} />
       <aside className={`sidebar ${open ? 'open' : ''}`}>
         <div className="brand"><img src="/logo.png" alt="MCCIA" className="logo" style={{ height: 44 }} /></div>
         <nav className="nav">

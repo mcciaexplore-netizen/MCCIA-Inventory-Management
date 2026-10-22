@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, X } from 'lucide-react';
 
 export function Modal({ title, onClose, children }) {
   useEffect(() => {
@@ -10,11 +9,18 @@ export function Modal({ title, onClose, children }) {
   return (
     <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-modal="true">
-        <h2>{title}</h2>
+        <div className="modal-header">
+          <h2>{title}</h2>
+          <button type="button" className="btn ghost sm icon-only" onClick={onClose} aria-label="Close modal"><X size={18} /></button>
+        </div>
         {children}
       </div>
     </div>
   );
+}
+
+export function Skeleton({ height = 24, width = '100%', radius = 'var(--r-md)' }) {
+  return <div className="skeleton" style={{ height, width, borderRadius: radius }} />;
 }
 
 export function Alert({ kind = 'error', children }) {
