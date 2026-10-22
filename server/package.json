@@ -5,8 +5,8 @@
   "engines": { "node": ">=20.0.0" },
   "scripts": {
     "build": "npm install --prefix ../client --include=dev && npm run build --prefix ../client",
-    "start": "node index.js",
-    "dev": "node --watch index.js",
+    "start": "node --env-file-if-exists=.env index.js",
+    "dev": "node --env-file-if-exists=.env --watch index.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
