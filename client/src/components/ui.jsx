@@ -27,7 +27,7 @@ export function Skeleton({ height = 24, width = '100%', radius = 'var(--r-md)' }
 export function Alert({ kind = 'error', children }) {
   if (!children) return null;
   const Icon = kind === 'error' ? AlertCircle : CheckCircle2;
-  return <div className={`alert ${kind}`}><Icon />{children}</div>;
+  return <div className={`alert ${kind}`} role="alert"><Icon />{children}</div>;
 }
 
 export function Field({ label, children }) {
