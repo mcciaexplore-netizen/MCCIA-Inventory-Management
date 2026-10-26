@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Check, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api.js';
 import { Alert, Field, Modal } from '../components/ui.jsx';
+import { roleLabel } from '../roles.js';
 
 const blank = { name: '', email: '', password: '', role: 'staff', office: 'Head Office' };
 
@@ -49,15 +50,11 @@ export default function Users({ me }) {
               {users.map((u) => (
                 <tr key={u.id}>
                   <td><strong>{u.name}</strong></td><td>{u.email}</td>
+                  <td>{u.office}</td>
                   <td>
-                    <select value={u.office} aria-label={`Office for ${u.name}`} onChange={(e) => act(() => api.put(`/api/users/${u.id}/office`, { office: e.target.value }))}>
-                      {offices.map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  </td>
-                  <td>
-                    {u.id === me.id ? <span className="badge">{u.role}</span> : (
+                    {u.id === me.id ? <span className="badge">{roleLabel(u.role)}</span> : (
                       <select value={u.role} aria-label={`Role for ${u.name}`} onChange={(e) => act(() => api.put(`/api/users/${u.id}/role`, { role: e.target.value }))}>
-                        <option value="staff">Staff</option><option value="employee">Employee</option><option value="admin">Admin</option>
+                        <option value="staff">{roleLabel('staff')}</option><option value="employee">{roleLabel('employee')}</option><option value="admin">{roleLabel('admin')}</option>
                       </select>
                     )}
                     {!u.approved && <span className="badge red" style={{ marginLeft: '0.4rem' }}>pending</span>}
@@ -94,7 +91,7 @@ export default function Users({ me }) {
             <Field label="Office"><select value={form.office} onChange={set('office')}>{offices.map((o) => <option key={o} value={o}>{o}</option>)}</select></Field>
             <div className="form-row">
               <Field label="Password"><input type="password" minLength="6" required value={form.password} onChange={set('password')} /></Field>
-              <Field label="Role"><select value={form.role} onChange={set('role')}><option value="staff">Staff</option><option value="employee">Employee</option><option value="admin">Admin</option></select></Field>
+              <Field label="Role"><select value={form.role} onChange={set('role')}><option value="staff">{roleLabel('staff')}</option><option value="employee">{roleLabel('employee')}</option><option value="admin">{roleLabel('admin')}</option></select></Field>
             </div>
             <div className="modal-actions">
               <button type="button" className="btn ghost" onClick={() => setForm(null)}>Cancel</button>

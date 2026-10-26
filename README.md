@@ -13,9 +13,14 @@ Run the server test suite with `cd server && npm test`; it runs against an isola
 
 ## Roles
 
+The database stores three role values — `admin`, `employee`, `staff` — but the UI shows `employee` as
+**Staff** and `staff` as **Employee**, so the on-screen label matches everyday usage (an ordinary office
+employee only requests items; the inventory/store staff manage stock). Picking a role under **Users**
+still means choosing one of these three stored values, just displayed under the swapped name.
+
 - **admin** — everything: users, categories, items, purchase orders, deleting items, the audit log.
-- **employee** — day-to-day inventory work: items, purchases, purchase orders, issuing/returning stock, fulfilling staff requests, raising maintenance complaints.
-- **staff** — the lowest-privilege role: browse items, raise their own stock requests, and resolve maintenance complaints (see below).
+- **employee** (shown as **Staff**) — day-to-day inventory work: items, purchases, purchase orders, issuing/returning stock, fulfilling staff requests, raising maintenance complaints.
+- **staff** (shown as **Employee**) — the lowest-privilege role: browse items, raise their own stock requests, and resolve maintenance complaints (see below).
 
 ## Accounts
 

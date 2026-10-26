@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { FileText, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, Truck, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
 import { api, getToken, setToken } from './api.js';
+import { roleLabel } from './roles.js';
 const PurchaseOrders = lazy(() => import('./pages/PurchaseOrders.jsx'));
 const Requests = lazy(() => import('./pages/Requests.jsx'));
 import Login from './pages/Login.jsx';
@@ -70,7 +71,7 @@ export default function App() {
         </nav>
         <div className="spacer" />
         <NavLink to="/account" className="user-box" style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}>
-          <UserCog size={14} /> <strong>{user.name}</strong><br /><span className="badge">{user.role}</span>
+          <UserCog size={14} /> <strong>{user.name}</strong><br /><span className="badge">{roleLabel(user.role)}</span>
         </NavLink>
         <button className="btn ghost" onClick={logout}><LogOut /> Sign out</button>
       </aside>

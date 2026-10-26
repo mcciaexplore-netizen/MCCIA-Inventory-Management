@@ -621,15 +621,6 @@ app.put('/api/users/:id/role', admin, wrap(async (req, res) => {
   await audit(req, 'role_change', 'user', id, `${u.email}: ${u.role} → ${role}`);
   res.json({ ok: true });
 }));
-app.put('/api/users/:id/office', admin, wrap(async (req, res) => {
-  const id = int(req.params.id), office = (req.body.office || '').trim();
-  if (!OFFICES.includes(office)) return bad(res, 'Choose a valid office');
-  const u = await db.get('SELECT email,office FROM users WHERE id=?', [id]);
-  if (!u) return bad(res, 'User not found', 404);
-  await db.run('UPDATE users SET office=? WHERE id=?', [office, id]);
-  await audit(req, 'office_change', 'user', id, `${u.email}: ${u.office} → ${office}`);
-  res.json({ ok: true });
-}));
 app.post('/api/users', admin, wrap(async (req, res) => {
   const { name = '', email = '', password = '', role = 'staff', office = '' } = req.body;
   if (!name.trim() || !email.trim() || password.length < 6) return bad(res, 'Name, email and a 6+ character password are required');

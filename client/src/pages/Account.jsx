@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api.js';
 import { Alert, Field } from '../components/ui.jsx';
+import { roleLabel } from '../roles.js';
 
 export default function Account({ user, forced = false, onChanged }) {
   const [f, setF] = useState({ current_password: '', new_password: '', confirm: '' });
@@ -21,7 +22,7 @@ export default function Account({ user, forced = false, onChanged }) {
 
   return (
     <>
-      <div className="page-head reveal"><div><span className="label">Account</span><h1>{user.name}</h1><p>{user.email} · {user.role}</p></div></div>
+      <div className="page-head reveal"><div><span className="label">Account</span><h1>{user.name}</h1><p>{user.email} · {roleLabel(user.role)}</p></div></div>
       <form className="card reveal" style={{ maxWidth: 480 }} onSubmit={save}>
         <h3 style={{ marginBottom: '1rem' }}>Change password</h3>
         {forced && <p style={{ marginBottom: '1rem' }}>Your password was set by an admin or is the default one. Choose a new password to continue.</p>}
