@@ -5,7 +5,10 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
-import { ORG, alertRecipients, lowStockEmail, mailReady, poEmail, sendMail } from './mail.js';
+import {
+  ORG, alertRecipients, lowStockEmail, mailReady, maintenanceClosedEmail, maintenanceOpenEmail,
+  maintenanceRecipients, poEmail, requestClosedEmail, requestOpenEmail, sendMail,
+} from './mail.js';
 import { MCCIA_GSTIN, PO_SIGNATORY, PO_SIGNATORY_TITLE, TERMS, buildPoDocx } from './poDocument.js';
 
 const app = express();
@@ -57,6 +60,35 @@ async function notifyLow(itemId, before) {
     const to = await alertRecipients();
     if (mailReady() && to.length) await sendMail({ to, subject: `Low stock: ${it.name} (${it.quantity} left)`, html: lowStockEmail(it) });
   } catch (e) { console.error('low-stock alert failed:', e.message); }
+}
+
+// Notification emails below are all best-effort: a failed send is logged but never blocks the
+// underlying action, since the request/ticket itself has already been committed to the database.
+async function notifyRequestOpened(r) {
+  try {
+    const to = await alertRecipients();
+    if (mailReady() && to.length) await sendMail({ to, subject: `New request: ${r.quantity} × ${r.item_name}`, html: requestOpenEmail(r) });
+  } catch (e) { console.error('request-opened alert failed:', e.message); }
+}
+async function notifyRequestClosed(r, requesterEmail) {
+  try {
+    if (mailReady() && requesterEmail) {
+      await sendMail({ to: requesterEmail, subject: `Request ${r.status}: ${r.quantity} × ${r.item_name}`, html: requestClosedEmail(r) });
+    }
+  } catch (e) { console.error('request-closed alert failed:', e.message); }
+}
+async function notifyMaintenanceOpened(ticket) {
+  try {
+    const to = await maintenanceRecipients();
+    if (mailReady() && to.length) await sendMail({ to, subject: 'New maintenance complaint', html: maintenanceOpenEmail(ticket) });
+  } catch (e) { console.error('maintenance-opened alert failed:', e.message); }
+}
+async function notifyMaintenanceClosed(ticket, raisedByEmail) {
+  try {
+    if (mailReady() && raisedByEmail) {
+      await sendMail({ to: raisedByEmail, subject: 'Maintenance complaint resolved', html: maintenanceClosedEmail(ticket) });
+    }
+  } catch (e) { console.error('maintenance-closed alert failed:', e.message); }
 }
 
 const SESSION_DAYS = 30;
@@ -455,7 +487,7 @@ app.post('/api/issues/:id/return', employee, wrap(async (req, res) => {
 }));
 
 // Staff requests: staff ask for items, employees fulfil (which issues the stock) or reject.
-const REQ_SQL = `SELECT r.*, i.name item_name, i.quantity stock, u.name requester_name, u.office requester_office, rb.name resolved_by_name,
+const REQ_SQL = `SELECT r.*, i.name item_name, i.quantity stock, u.name requester_name, u.office requester_office, u.email requester_email, rb.name resolved_by_name,
   (SELECT COUNT(*) FROM queries q WHERE q.request_id=r.id AND q.status='open') open_queries
   FROM requests r JOIN items i ON i.id=r.item_id LEFT JOIN users u ON u.id=r.requested_by LEFT JOIN users rb ON rb.id=r.resolved_by`;
 const isEmployee = (u) => u.role === 'admin' || u.role === 'employee';
@@ -467,8 +499,10 @@ app.post('/api/requests', wrap(async (req, res) => {
   if (!(qty > 0)) return bad(res, 'Quantity must be at least 1');
   const item = await db.get('SELECT * FROM items WHERE id=?', [itemId]);
   if (!item) return bad(res, 'Item not found', 404);
-  const id = await db.insert('INSERT INTO requests (item_id,quantity,note,requested_by,requested_at) VALUES (?,?,?,?,?)', [itemId, qty, (req.body.note || '').trim() || null, req.user.id, stamp()]);
+  const note = (req.body.note || '').trim() || null;
+  const id = await db.insert('INSERT INTO requests (item_id,quantity,note,requested_by,requested_at) VALUES (?,?,?,?,?)', [itemId, qty, note, req.user.id, stamp()]);
   await audit(req, 'request', 'item', itemId, `${qty} × ${item.name} requested by ${req.user.name}`);
+  await notifyRequestOpened({ item_name: item.name, quantity: qty, note, requester_name: req.user.name, requester_office: req.user.office });
   res.status(201).json({ id });
 }));
 app.post('/api/requests/:id/cancel', wrap(async (req, res) => {
@@ -492,14 +526,17 @@ app.post('/api/requests/:id/fulfill', employee, wrap(async (req, res) => {
   });
   await notifyLow(r.item_id, r.stock);
   await audit(req, 'issue', 'item', r.item_id, `${r.quantity} × ${r.item_name} → ${r.requester_name} (request #${r.id})`);
+  await notifyRequestClosed({ ...r, status: 'fulfilled' }, r.requester_email);
   res.json({ ok: true });
 }));
 app.post('/api/requests/:id/reject', employee, wrap(async (req, res) => {
-  const r = await db.get('SELECT * FROM requests WHERE id=?', [int(req.params.id)]);
+  const r = await db.get(`${REQ_SQL} WHERE r.id=?`, [int(req.params.id)]);
   if (!r) return bad(res, 'Not found', 404);
   if (r.status !== 'pending') return bad(res, 'Request is not pending');
-  await db.run(`UPDATE requests SET status='rejected', resolved_by=?, resolved_at=?, reject_reason=? WHERE id=?`, [req.user.id, stamp(), (req.body.reason || '').trim() || null, r.id]);
-  await audit(req, 'reject', 'request', r.id, req.body.reason || null);
+  const reason = (req.body.reason || '').trim() || null;
+  await db.run(`UPDATE requests SET status='rejected', resolved_by=?, resolved_at=?, reject_reason=? WHERE id=?`, [req.user.id, stamp(), reason, r.id]);
+  await audit(req, 'reject', 'request', r.id, reason);
+  await notifyRequestClosed({ ...r, status: 'rejected', reject_reason: reason }, r.requester_email);
   res.json({ ok: true });
 }));
 
@@ -561,7 +598,7 @@ app.post('/api/maintenance/upload', wrap(async (req, res, next) => {
     bad(res, 'Photo upload failed, please try again', 502);
   }
 }));
-const MT_SQL = `SELECT t.*, u.name raised_by_name, u.office raised_by_office, rb.name resolved_by_name
+const MT_SQL = `SELECT t.*, u.name raised_by_name, u.office raised_by_office, u.email raised_by_email, rb.name resolved_by_name
   FROM maintenance_tickets t LEFT JOIN users u ON u.id=t.raised_by LEFT JOIN users rb ON rb.id=t.resolved_by`;
 app.get('/api/maintenance', wrap(async (req, res) => {
   const canSeeAll = ['admin', 'staff'].includes(req.user.role);
@@ -574,10 +611,11 @@ app.post('/api/maintenance', employee, wrap(async (req, res) => {
   if (!note && !photoUrl) return bad(res, 'Add a note or a photo describing the complaint');
   const id = await db.insert('INSERT INTO maintenance_tickets (note,photo_url,raised_by,raised_at) VALUES (?,?,?,?)', [note, photoUrl, req.user.id, stamp()]);
   await audit(req, 'create', 'maintenance_ticket', id, note || '(photo only)');
+  await notifyMaintenanceOpened({ note, photo_url: photoUrl, raised_by_name: req.user.name, raised_by_office: req.user.office });
   res.status(201).json({ id });
 }));
 app.post('/api/maintenance/:id/resolve', staffOrAdmin, wrap(async (req, res) => {
-  const t = await db.get('SELECT * FROM maintenance_tickets WHERE id=?', [int(req.params.id)]);
+  const t = await db.get(`${MT_SQL} WHERE t.id=?`, [int(req.params.id)]);
   if (!t) return bad(res, 'Not found', 404);
   if (t.status !== 'open') return bad(res, 'Already resolved');
   const photoUrl = (req.body.resolution_photo_url || '').trim();
@@ -586,6 +624,7 @@ app.post('/api/maintenance/:id/resolve', staffOrAdmin, wrap(async (req, res) => 
   await db.run(`UPDATE maintenance_tickets SET status='resolved', resolution_photo_url=?, resolution_note=?, resolved_by=?, resolved_at=? WHERE id=?`,
     [photoUrl, note, req.user.id, stamp(), t.id]);
   await audit(req, 'resolve', 'maintenance_ticket', t.id, note || null);
+  await notifyMaintenanceClosed({ ...t, resolution_photo_url: photoUrl, resolution_note: note }, t.raised_by_email);
   res.json({ ok: true });
 }));
 
