@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { FileText, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, Truck, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
-import { api, getToken, setToken } from './api.js';
+import { api } from './api.js';
 import { roleLabel } from './roles.js';
 const PurchaseOrders = lazy(() => import('./pages/PurchaseOrders.jsx'));
 const Requests = lazy(() => import('./pages/Requests.jsx'));
@@ -18,12 +18,14 @@ const Maintenance = lazy(() => import('./pages/Maintenance.jsx'));
 
 export default function App() {
   const [user, setUser] = useState(null);
-  const [ready, setReady] = useState(!getToken());
+  const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
   const loc = useLocation();
 
+  // Auth is a server-set httpOnly cookie, invisible to JS, so the only way to know if a
+  // session exists is to ask the server.
   useEffect(() => {
-    if (getToken()) api.get('/api/me').then(setUser).catch(() => setToken(null)).finally(() => setReady(true));
+    api.get('/api/me').then(setUser).catch(() => {}).finally(() => setReady(true));
   }, []);
   useEffect(() => setOpen(false), [loc.pathname]);
 
@@ -32,7 +34,7 @@ export default function App() {
 
   const isAdmin = user.role === 'admin';
   const canManage = isAdmin || user.role === 'employee';
-  const logout = async () => { await api.post('/api/logout').catch(() => {}); setToken(null); setUser(null); };
+  const logout = async () => { await api.post('/api/logout').catch(() => {}); setUser(null); };
 
   // A default or admin-set password must be replaced before anything else is usable.
   if (user.must_change_password) {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
-import { app, auth, createUser, loginAs } from './helpers.js';
+import { app, auth, createUser, loginAs, tokenFromSetCookie } from './helpers.js';
 import { db, hashPassword } from '../db.js';
 
 describe('login', () => {
@@ -35,11 +35,11 @@ describe('login', () => {
     expect(res.status).toBe(429);
   });
 
-  it('succeeds with correct credentials and returns a session token', async () => {
+  it('succeeds with correct credentials and sets a session cookie', async () => {
     const u = await createUser({ role: 'staff' });
     const res = await request(app).post('/api/login').send({ email: u.email, password: u.password, office: u.office });
     expect(res.status).toBe(200);
-    expect(res.body.token).toBeTruthy();
+    expect(tokenFromSetCookie(res)).toBeTruthy();
     expect(res.body.user.role).toBe('staff');
   });
 });
@@ -52,7 +52,7 @@ describe('forced password change', () => {
       ['Needs Change', email, hashPassword('password123'), 'staff', 'Head Office'],
     );
     const login = await request(app).post('/api/login').send({ email, password: 'password123', office: 'Head Office' });
-    const token = login.body.token;
+    const token = tokenFromSetCookie(login);
 
     const blocked = await auth(request(app).get('/api/items'), token);
     expect(blocked.status).toBe(403);

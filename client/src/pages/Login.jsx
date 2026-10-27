@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, setToken } from '../api.js';
+import { api } from '../api.js';
 import { Alert, Field } from '../components/ui.jsx';
 
 export default function Login({ onLogin }) {
@@ -22,8 +22,8 @@ export default function Login({ onLogin }) {
         setSignup(false); setForm({ ...form, password: '' });
         setNotice('Account created. An admin needs to approve it before you can sign in.');
       } else {
-        const { token, user } = await api.post('/api/login', form);
-        setToken(token); onLogin(user);
+        const { user } = await api.post('/api/login', form);
+        onLogin(user);
       }
     } catch (err) { setError(err.message); } finally { setBusy(false); }
   }

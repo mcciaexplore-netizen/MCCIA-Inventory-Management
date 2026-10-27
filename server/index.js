@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import cors from 'cors';
+import { parse as parseCookie } from 'cookie';
 import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
@@ -16,7 +17,7 @@ app.set('trust proxy', 1); // behind Vercel's proxy: req.ip must read the real c
 // Client and API share one origin in both dev (Vite proxy) and prod (Vercel rewrite), so cross-origin
 // access isn't needed by default; set CORS_ORIGIN (comma-separated) only if a separate domain needs it.
 const corsOrigins = (process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
-app.use(cors({ origin: corsOrigins.length ? corsOrigins : false }));
+app.use(cors({ origin: corsOrigins.length ? corsOrigins : false, credentials: corsOrigins.length > 0 }));
 app.use(express.json());
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 // Generic per-IP throttle against scripted abuse across the whole API (the DB-backed per-email
@@ -24,6 +25,7 @@ app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next
 // so it's a coarse defense-in-depth layer, not the only one.
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false }));
 const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many sign-up attempts. Try again later.' } });
+const passwordChangeLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many password-change attempts. Try again later.' } });
 
 class HttpError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -39,6 +41,9 @@ const wrap = (fn) => async (req, res, next) => {
 };
 const bad = (res, error, code = 400) => res.status(code).json({ error });
 const int = (v) => Number.parseInt(v, 10);
+// Rejects any scheme other than http(s) so a stored URL can't become a `javascript:` link
+// when rendered as <a href> in emails or in the app (e.g. maintenance photo URLs).
+const isHttpUrl = (v) => { try { return ['http:', 'https:'].includes(new URL(v).protocol); } catch { return false; } };
 const today = () => stamp().slice(0, 10);
 
 const audit = (req, action, entity, entityId, detail) =>
@@ -92,11 +97,18 @@ async function notifyMaintenanceClosed(ticket, raisedByEmail) {
 }
 
 const SESSION_DAYS = 30;
+const SESSION_COOKIE = 'session';
+// Secure cookies require HTTPS; only the Vercel deployment serves over HTTPS, so dev (plain http://localhost) needs it off.
+const isProd = !!process.env.VERCEL;
+const setSessionCookie = (res, token) => res.cookie(SESSION_COOKIE, token, {
+  httpOnly: true, secure: isProd, sameSite: 'lax', maxAge: SESSION_DAYS * 864e5, path: '/',
+});
+const clearSessionCookie = (res) => res.clearCookie(SESSION_COOKIE, { path: '/' });
 const daysAgo = (n) => stamp(new Date(Date.now() - n * 864e5));
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, office: u.office, must_change_password: !!u.must_change_password });
 
 const auth = wrap(async (req, res, next) => {
-  const token = (req.headers.authorization || '').replace('Bearer ', '');
+  const token = parseCookie(req.headers.cookie || '')[SESSION_COOKIE] || '';
   const user = token && await db.get(`SELECT u.id,u.name,u.email,u.role,u.office,u.must_change_password FROM sessions s JOIN users u ON u.id=s.user_id
     WHERE s.token=? AND s.created_at > ? AND u.approved`, [token, daysAgo(SESSION_DAYS)]);
   if (!user) return bad(res, 'Unauthorized', 401);
@@ -128,7 +140,8 @@ app.post('/api/login', wrap(async (req, res) => {
   await db.run('DELETE FROM sessions WHERE created_at < ?', [daysAgo(SESSION_DAYS)]);
   const token = crypto.randomBytes(32).toString('hex');
   await db.run('INSERT INTO sessions (token,user_id,created_at) VALUES (?,?,?)', [token, u.id, stamp()]);
-  res.json({ token, user: publicUser(u) });
+  setSessionCookie(res, token);
+  res.json({ user: publicUser(u) });
 }));
 
 // Self sign-up creates a pending staff account; an admin approves it under Users before it can sign in.
@@ -146,8 +159,8 @@ app.post('/api/register', registerLimiter, wrap(async (req, res) => {
 
 app.use('/api', auth);
 app.get('/api/me', (req, res) => res.json(publicUser(req.user)));
-app.post('/api/logout', wrap(async (req, res) => { await db.run('DELETE FROM sessions WHERE token=?', [req.token]); res.json({ ok: true }); }));
-app.post('/api/me/password', wrap(async (req, res) => {
+app.post('/api/logout', wrap(async (req, res) => { await db.run('DELETE FROM sessions WHERE token=?', [req.token]); clearSessionCookie(res); res.json({ ok: true }); }));
+app.post('/api/me/password', passwordChangeLimiter, wrap(async (req, res) => {
   const { current_password = '', new_password = '' } = req.body;
   const u = await db.get('SELECT * FROM users WHERE id=?', [req.user.id]);
   if (!verifyPassword(current_password, u.password_hash)) return bad(res, 'Current password is incorrect');
@@ -587,17 +600,27 @@ app.post('/api/maintenance/upload', wrap(async (req, res, next) => {
   photoUpload.single('photo')(req, res, (err) => err ? next(err) : next());
 }), wrap(async (req, res) => {
   if (!req.file) return bad(res, 'No photo provided');
-  if (!/^image\//.test(req.file.mimetype)) return bad(res, 'Only image files are allowed');
+  const sniffed = sniffImageType(req.file.buffer);
+  if (!sniffed) return bad(res, 'Only image files are allowed');
   try {
     const { put } = await import('@vercel/blob');
-    const ext = (req.file.mimetype.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
-    const blob = await put(`maintenance/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`, req.file.buffer, { access: 'public', contentType: req.file.mimetype });
+    const blob = await put(`maintenance/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${sniffed.ext}`, req.file.buffer, { access: 'public', contentType: sniffed.mime });
     res.json({ url: blob.url });
   } catch (e) {
     console.error('Blob upload failed:', e.message);
     bad(res, 'Photo upload failed, please try again', 502);
   }
 }));
+// Identifies the real image type from its magic bytes, since a client-supplied
+// Content-Type header can be spoofed to smuggle arbitrary files past an extension check.
+function sniffImageType(buf) {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { mime: 'image/jpeg', ext: 'jpg' };
+  if (buf.length >= 8 && buf.toString('hex', 0, 8) === '89504e470d0a1a0a') return { mime: 'image/png', ext: 'png' };
+  if (buf.length >= 6 && (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a')) return { mime: 'image/gif', ext: 'gif' };
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', ext: 'webp' };
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return { mime: 'image/bmp', ext: 'bmp' };
+  return null;
+}
 const MT_SQL = `SELECT t.*, u.name raised_by_name, u.office raised_by_office, u.email raised_by_email, rb.name resolved_by_name
   FROM maintenance_tickets t LEFT JOIN users u ON u.id=t.raised_by LEFT JOIN users rb ON rb.id=t.resolved_by`;
 app.get('/api/maintenance', wrap(async (req, res) => {
@@ -609,6 +632,7 @@ app.get('/api/maintenance', wrap(async (req, res) => {
 app.post('/api/maintenance', employee, wrap(async (req, res) => {
   const note = (req.body.note || '').trim() || null, photoUrl = (req.body.photo_url || '').trim() || null;
   if (!note && !photoUrl) return bad(res, 'Add a note or a photo describing the complaint');
+  if (photoUrl && !isHttpUrl(photoUrl)) return bad(res, 'Invalid photo URL');
   const id = await db.insert('INSERT INTO maintenance_tickets (note,photo_url,raised_by,raised_at) VALUES (?,?,?,?)', [note, photoUrl, req.user.id, stamp()]);
   await audit(req, 'create', 'maintenance_ticket', id, note || '(photo only)');
   await notifyMaintenanceOpened({ note, photo_url: photoUrl, raised_by_name: req.user.name, raised_by_office: req.user.office });
@@ -620,6 +644,7 @@ app.post('/api/maintenance/:id/resolve', staffOrAdmin, wrap(async (req, res) => 
   if (t.status !== 'open') return bad(res, 'Already resolved');
   const photoUrl = (req.body.resolution_photo_url || '').trim();
   if (!photoUrl) return bad(res, 'Attach a photo showing the fix to close this complaint');
+  if (!isHttpUrl(photoUrl)) return bad(res, 'Invalid photo URL');
   const note = (req.body.resolution_note || '').trim() || null;
   await db.run(`UPDATE maintenance_tickets SET status='resolved', resolution_photo_url=?, resolution_note=?, resolved_by=?, resolved_at=? WHERE id=?`,
     [photoUrl, note, req.user.id, stamp(), t.id]);

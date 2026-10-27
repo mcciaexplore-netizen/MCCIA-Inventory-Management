@@ -1,17 +1,18 @@
-export const getToken = () => localStorage.getItem('token');
-export const setToken = (t) => (t ? localStorage.setItem('token', t) : localStorage.removeItem('token'));
-
+// Auth is a server-set httpOnly cookie (not readable or stored by this client), sent automatically
+// by the browser on same-origin requests; `credentials: 'include'` also covers a configured
+// cross-origin deployment (CORS_ORIGIN) paired with the server's matching credentials setting.
 async function request(method, url, body) {
   const res = await fetch(url, {
     method,
     cache: 'no-store',
-    headers: { 'Content-Type': 'application/json', ...(getToken() && { Authorization: `Bearer ${getToken()}` }) },
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => null);
   if (data === null && res.ok) throw new Error('Unexpected server response. Restart the server so it matches this version.');
   if (!res.ok) {
-    if (res.status === 401 && url !== '/api/login') { setToken(null); window.location.reload(); }
+    if (res.status === 401 && url !== '/api/login') window.location.reload();
     throw new Error(data?.error || 'Request failed');
   }
   return data;
@@ -26,10 +27,10 @@ export const api = {
 
 // Downloads a binary response (e.g. a generated PO document) and saves it as a local file.
 export async function downloadFile(url, filename) {
-  const res = await fetch(url, { headers: { ...(getToken() && { Authorization: `Bearer ${getToken()}` }) } });
+  const res = await fetch(url, { credentials: 'include' });
   if (!res.ok) {
     const data = await res.json().catch(() => null);
-    if (res.status === 401) { setToken(null); window.location.reload(); }
+    if (res.status === 401) window.location.reload();
     throw new Error(data?.error || 'Download failed');
   }
   const blob = await res.blob();
@@ -47,10 +48,10 @@ export async function downloadFile(url, filename) {
 export async function uploadPhoto(url, file) {
   const fd = new FormData();
   fd.append('photo', file);
-  const res = await fetch(url, { method: 'POST', headers: { ...(getToken() && { Authorization: `Bearer ${getToken()}` }) }, body: fd });
+  const res = await fetch(url, { method: 'POST', credentials: 'include', body: fd });
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    if (res.status === 401) { setToken(null); window.location.reload(); }
+    if (res.status === 401) window.location.reload();
     throw new Error(data?.error || 'Upload failed');
   }
   return data;

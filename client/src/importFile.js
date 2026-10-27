@@ -2,11 +2,26 @@
 export async function readGrid(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   if (ext === 'pdf') return pdfGrid(await file.arrayBuffer());
-  if (!['xlsx', 'xls', 'csv', 'tsv', 'txt'].includes(ext)) throw new Error('Use an .xlsx, .xls, .csv or .pdf file');
-  const XLSX = await import('xlsx');
-  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false }).map((r) => r.map((c) => String(c).trim()));
+  if (ext === 'csv' || ext === 'tsv' || ext === 'txt') return textGrid(await file.text(), ext === 'tsv' ? '\t' : ',');
+  if (!['xlsx', 'xls'].includes(ext)) throw new Error('Use an .xlsx, .xls, .csv or .pdf file');
+  const ExcelJS = await import('exceljs');
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await file.arrayBuffer());
+  const ws = wb.worksheets[0];
+  const rows = [];
+  ws.eachRow({ includeEmpty: true }, (row) => {
+    const cells = [];
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      const v = cell.value;
+      cells.push(v == null ? '' : String(v.text ?? v.result ?? v).trim());
+    });
+    rows.push(cells);
+  });
+  return rows;
+}
+
+function textGrid(text, delim) {
+  return text.split(/\r\n|\r|\n/).filter((l) => l.length).map((line) => line.split(delim).map((c) => c.trim()));
 }
 
 async function pdfGrid(buf) {

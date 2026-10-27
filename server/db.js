@@ -198,13 +198,11 @@ export function verifyPassword(pw, stored) {
 }
 
 if (!(await db.get('SELECT 1 FROM users LIMIT 1'))) {
+  const tempPassword = crypto.randomBytes(9).toString('base64url');
   await db.run('INSERT INTO users (name,email,password_hash,role,must_change_password) VALUES (?,?,?,?,TRUE)',
-    ['Administrator', 'admin@mccia.local', hashPassword('admin123'), 'admin']);
+    ['Administrator', 'admin@mccia.local', hashPassword(tempPassword), 'admin']);
   for (const c of ['IT Equipment', 'Furniture', 'Stationery', 'Housekeeping', 'Audio/Visual', 'Other'])
     await db.run('INSERT INTO categories (name) VALUES (?)', [c]);
-  console.log('Seeded admin user: admin@mccia.local / admin123 (must be changed at first login)');
+  console.log(`Seeded admin user admin@mccia.local with one-time password: ${tempPassword} (must be changed at first login; shown only this once)`);
 }
-// Databases created before the forced change: make the seeded admin change the default password too.
-const seeded = await db.get(`SELECT id,password_hash FROM users WHERE email='admin@mccia.local' AND NOT must_change_password`);
-if (seeded && verifyPassword('admin123', seeded.password_hash)) await db.run('UPDATE users SET must_change_password=TRUE WHERE id=?', [seeded.id]);
 

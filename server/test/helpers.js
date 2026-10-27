@@ -17,14 +17,21 @@ export async function createUser({ role = 'staff', office = 'Head Office' } = {}
   return { id, email, password, office, role };
 }
 
+// Auth is a session cookie now; extract its value from the Set-Cookie header so tests can
+// replay it on subsequent requests the same way a browser would.
+export function tokenFromSetCookie(res) {
+  const raw = (res.headers['set-cookie'] || []).find((c) => c.startsWith('session='));
+  return raw ? raw.split(';')[0].split('=')[1] : null;
+}
+
 export async function loginAs(opts) {
   const u = await createUser(opts);
   const res = await request(app).post('/api/login').send({ email: u.email, password: u.password, office: u.office });
   if (res.status !== 200) throw new Error(`test login failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return { ...u, token: res.body.token };
+  return { ...u, token: tokenFromSetCookie(res) };
 }
 
-export const auth = (req, token) => req.set('Authorization', `Bearer ${token}`);
+export const auth = (req, token) => req.set('Cookie', `session=${token}`);
 
 export async function createCategory(name = `Category ${unique()}`) {
   return db.insert('INSERT INTO categories (name) VALUES (?)', [name]);
