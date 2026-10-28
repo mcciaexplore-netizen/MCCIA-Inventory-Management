@@ -156,7 +156,7 @@ app.post('/api/login', wrap(async (req, res) => {
   res.json({ user: publicUser(u) });
 }));
 
-// Hub SSO: the Hub signs an RS256 JWT for this app (aud = SSO_AUDIENCE) and redirects the browser here.
+// Hub SSO: the Hub signs an ES256 JWT for this app (aud = SSO_AUDIENCE) and redirects the browser here.
 // Users are matched by email; an unknown email gets an approved account with a random (unused) password.
 // Errors redirect to /?reason=... since this is a browser navigation, not an API call. The Hub may send
 // the token as ?token= on a GET or as a `token` field in a POST body (form-encoded or JSON).
@@ -170,7 +170,7 @@ const ssoCallback = wrap(async (req, res) => {
   }
   let claims;
   try {
-    claims = jwt.verify(String(req.body?.token || req.query.token || ''), key, { algorithms: ['RS256'], audience });
+    claims = jwt.verify(String(req.body?.token || req.query.token || ''), key, { algorithms: ['ES256'], audience });
   } catch (e) {
     console.error(`SSO token rejected: ${e.message}`);
     return res.redirect('/?reason=invalid');

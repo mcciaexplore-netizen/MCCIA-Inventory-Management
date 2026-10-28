@@ -6,7 +6,7 @@ import { app, auth, createUser, tokenFromSetCookie } from './helpers.js';
 import { db } from '../db.js';
 
 // A throwaway keypair stands in for the Hub's signing key.
-const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const PUBLIC_PEM = publicKey.export({ type: 'spki', format: 'pem' });
 const AUDIENCE = 'mccia-inventory';
 const ENV_KEYS = ['HUB_SSO_PUBLIC_KEY', 'SSO_AUDIENCE', 'HUB_URL', 'SSO_ENFORCE'];
@@ -26,7 +26,7 @@ afterEach(() => {
 let n = 0;
 const hubToken = (claims = {}, opts = {}) => jwt.sign(
   { sub: `hub-${++n}`, email: `sso-${Date.now()}-${n}@mccia.local`, name: 'SSO User', role: 'member', ...claims },
-  privateKey, { algorithm: 'RS256', audience: AUDIENCE, expiresIn: '5m', ...opts },
+  privateKey, { algorithm: 'ES256', audience: AUDIENCE, expiresIn: '5m', ...opts },
 );
 const callback = (token) => request(app).get('/api/sso/callback').query({ token });
 
@@ -39,12 +39,12 @@ describe('GET /api/sso/callback', () => {
   });
 
   it('rejects a bad signature, wrong audience, expired or exp-less token', async () => {
-    const other = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+    const other = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey;
     const bad = [
-      jwt.sign({ email: 'x@mccia.local' }, other, { algorithm: 'RS256', audience: AUDIENCE, expiresIn: '5m' }),
+      jwt.sign({ email: 'x@mccia.local' }, other, { algorithm: 'ES256', audience: AUDIENCE, expiresIn: '5m' }),
       hubToken({}, { audience: 'some-other-app' }),
-      jwt.sign({ email: 'x@mccia.local', exp: Math.floor(Date.now() / 1000) - 60 }, privateKey, { algorithm: 'RS256', audience: AUDIENCE }),
-      jwt.sign({ email: 'x@mccia.local' }, privateKey, { algorithm: 'RS256', audience: AUDIENCE }),
+      jwt.sign({ email: 'x@mccia.local', exp: Math.floor(Date.now() / 1000) - 60 }, privateKey, { algorithm: 'ES256', audience: AUDIENCE }),
+      jwt.sign({ email: 'x@mccia.local' }, privateKey, { algorithm: 'ES256', audience: AUDIENCE }),
       'not-a-jwt',
     ];
     for (const t of bad) {
