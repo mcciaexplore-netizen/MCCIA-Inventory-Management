@@ -5,3 +5,5 @@ server/inventory.db*
 .env
 .pgdata
 .pgdata.bak
+.vercel
+.env*

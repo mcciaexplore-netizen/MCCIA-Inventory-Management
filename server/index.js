@@ -160,7 +160,15 @@ app.post('/api/login', wrap(async (req, res) => {
 // Users are matched by email; an unknown email gets an approved account with a random (unused) password.
 // Errors redirect to /?reason=... since this is a browser navigation, not an API call. The Hub may send
 // the token as ?token= on a GET or as a `token` field in a POST body (form-encoded or JSON).
-// Vercel env vars often hold the PEM on one line with literal "\n" sequences; restore real newlines.
+//
+// HUB_SSO_PUBLIC_KEY format for ES256: the Hub's P-256 (prime256v1) *public* key as SPKI PEM, e.g.
+//   -----BEGIN PUBLIC KEY-----
+//   MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE<...rest of base64, 124 chars in total...>
+//   -----END PUBLIC KEY-----
+// Every P-256 SPKI key's base64 starts with "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE". Not accepted: a JWK
+// ({"kty":"EC",...}), "-----BEGIN EC PRIVATE KEY-----" / "-----BEGIN PRIVATE KEY-----" (that's the Hub's
+// signing secret and must never be set here), or an RSA key. In Vercel the PEM can be pasted multi-line,
+// or on one line with literal "\n" sequences, which are turned back into real newlines below.
 const hubPublicKey = () => (process.env.HUB_SSO_PUBLIC_KEY || '').replace(/\\n/g, '\n');
 const ssoCallback = wrap(async (req, res) => {
   const key = hubPublicKey(), audience = process.env.SSO_AUDIENCE;
@@ -168,11 +176,16 @@ const ssoCallback = wrap(async (req, res) => {
     console.error(`SSO callback misconfigured: missing ${[!key.trim() && 'HUB_SSO_PUBLIC_KEY', !audience && 'SSO_AUDIENCE'].filter(Boolean).join(' and ')}`);
     return res.redirect('/?reason=config');
   }
+  const token = String(req.body?.token || req.query.token || '');
+  // Debug: a token prefix is only its header plus a few payload characters, and the key is public.
+  console.log('SSO token received:', token.substring(0, 50), `(${token.length} chars, ${req.method})`);
+  console.log('SSO public key starts:', process.env.HUB_SSO_PUBLIC_KEY?.substring(0, 50));
   let claims;
   try {
-    claims = jwt.verify(String(req.body?.token || req.query.token || ''), key, { algorithms: ['ES256'], audience });
+    claims = jwt.verify(token, key, { algorithms: ['ES256'], audience });
   } catch (e) {
-    console.error(`SSO token rejected: ${e.message}`);
+    // The header's `alg` shows what the Hub really signed with when the error is "invalid algorithm".
+    console.error(`SSO token rejected: ${e.message} (token alg: ${jwt.decode(token, { complete: true })?.header?.alg ?? 'unreadable'})`);
     return res.redirect('/?reason=invalid');
   }
   // jwt.verify only checks expiry when `exp` is present, so a token without one is rejected here.
