@@ -2,13 +2,23 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { Alert, Field } from '../components/ui.jsx';
 
+// Set by the server's /api/sso/callback when a Hub sign-in can't go through.
+const SSO_REASONS = {
+  invalid: 'Your session link is invalid or has expired. Please sign in through the hub.',
+  config: 'SSO is not configured correctly. Contact your administrator.',
+  pending: 'Your account is pending approval by an administrator.',
+};
+
 export default function Login({ onLogin }) {
   const [form, setForm] = useState({ name: '', email: '', password: '', office: '' });
   const [offices, setOffices] = useState([]);
   useEffect(() => {
     api.get('/api/offices').then((o) => { setOffices(o); setForm((f) => ({ ...f, office: f.office || o[0] || '' })); }).catch((e) => setError(e.message));
+    // Drop ?reason= from the address bar so a refresh doesn't show the message again.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('reason')) { url.searchParams.delete('reason'); window.history.replaceState(null, '', url); }
   }, []);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => SSO_REASONS[new URLSearchParams(window.location.search).get('reason')] || '');
   const [busy, setBusy] = useState(false);
   const [signup, setSignup] = useState(false);
   const [notice, setNotice] = useState('');

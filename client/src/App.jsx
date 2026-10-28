@@ -16,6 +16,10 @@ const Audit = lazy(() => import('./pages/Audit.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
 const Maintenance = lazy(() => import('./pages/Maintenance.jsx'));
 
+// Hub SSO: with VITE_SSO_ENFORCE=true, signed-out users are sent to the Hub instead of the login form.
+const SSO_ENFORCE = import.meta.env.VITE_SSO_ENFORCE === 'true';
+const HUB_URL = (import.meta.env.VITE_HUB_URL || '').replace(/\/+$/, '');
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
@@ -23,9 +27,15 @@ export default function App() {
   const loc = useLocation();
 
   // Auth is a server-set httpOnly cookie, invisible to JS, so the only way to know if a
-  // session exists is to ask the server.
+  // session exists is to ask the server. /api/me covers password and Hub SSO sessions alike.
   useEffect(() => {
-    api.get('/api/me').then(setUser).catch(() => {}).finally(() => setReady(true));
+    api.get('/api/me').then(setUser).then(() => setReady(true), () => {
+      // With SSO enforced, go to the Hub, unless the Hub just sent the user back with an error
+      // (?reason=...), which the login page shows instead of bouncing between the two forever.
+      const reason = new URLSearchParams(window.location.search).get('reason');
+      if (SSO_ENFORCE && HUB_URL && !reason) window.location.assign(`${HUB_URL}/launch/mccia-inventory`);
+      else setReady(true);
+    });
   }, []);
   useEffect(() => setOpen(false), [loc.pathname]);
 
@@ -34,7 +44,11 @@ export default function App() {
 
   const isAdmin = user.role === 'admin';
   const canManage = isAdmin || user.role === 'employee';
-  const logout = async () => { await api.post('/api/logout').catch(() => {}); setUser(null); };
+  // SSO sign-out is a full page navigation: the server ends the session, then redirects to the Hub's logout.
+  const logout = async () => {
+    if (user.sso) return window.location.assign('/api/sso/logout');
+    await api.post('/api/logout').catch(() => {}); setUser(null);
+  };
 
   // A default or admin-set password must be replaced before anything else is usable.
   if (user.must_change_password) {

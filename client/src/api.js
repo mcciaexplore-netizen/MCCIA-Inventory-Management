@@ -12,7 +12,9 @@ async function request(method, url, body) {
   const data = await res.json().catch(() => null);
   if (data === null && res.ok) throw new Error('Unexpected server response. Restart the server so it matches this version.');
   if (!res.ok) {
-    if (res.status === 401 && url !== '/api/login') window.location.reload();
+    // A 401 mid-session means it expired: reload into the sign-in flow. The startup /api/me check
+    // and the login form handle their own 401s (reloading on those would loop forever).
+    if (res.status === 401 && url !== '/api/login' && url !== '/api/me') window.location.reload();
     throw new Error(data?.error || 'Request failed');
   }
   return data;

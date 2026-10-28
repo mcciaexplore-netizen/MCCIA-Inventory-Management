@@ -67,8 +67,9 @@ describe('GET /api/sso/callback', () => {
     const me = await auth(request(app).get('/api/sso/me'), session);
     expect(me.status).toBe(200);
     expect(me.body).toMatchObject({ sso: true, email, role: 'staff' });
-    // The SSO session works for the regular API too.
+    // The SSO session works for the regular API too, and /api/me flags it for the client's sign-out.
     expect((await auth(request(app).get('/api/items'), session)).status).toBe(200);
+    expect((await auth(request(app).get('/api/me'), session)).body.sso).toBe(true);
   });
 
   it('maps the Hub admin role to admin for new users', async () => {
@@ -99,6 +100,7 @@ describe('GET /api/sso/me', () => {
     const login = await request(app).post('/api/login').send({ email: u.email, password: u.password, office: u.office });
     const res = await auth(request(app).get('/api/sso/me'), tokenFromSetCookie(login));
     expect(res.status).toBe(401);
+    expect((await auth(request(app).get('/api/me'), tokenFromSetCookie(login))).body.sso).toBe(false);
   });
 
   it('returns 401 without a session', async () => {

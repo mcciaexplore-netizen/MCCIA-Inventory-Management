@@ -214,7 +214,8 @@ app.post('/api/register', registerLimiter, wrap(async (req, res) => {
 }));
 
 app.use('/api', auth);
-app.get('/api/me', (req, res) => res.json(publicUser(req.user)));
+// `sso` tells the client this session came from Hub SSO, so sign-out goes through /api/sso/logout.
+app.get('/api/me', (req, res) => res.json({ ...publicUser(req.user), sso: !!req.user.sso }));
 app.post('/api/logout', wrap(async (req, res) => { await db.run('DELETE FROM sessions WHERE token=?', [req.token]); clearSessionCookie(res); res.json({ ok: true }); }));
 app.post('/api/me/password', passwordChangeLimiter, wrap(async (req, res) => {
   const { current_password = '', new_password = '' } = req.body;
