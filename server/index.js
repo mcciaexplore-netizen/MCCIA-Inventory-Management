@@ -158,15 +158,21 @@ app.post('/api/login', wrap(async (req, res) => {
 
 // Hub SSO: the Hub signs an RS256 JWT for this app (aud = SSO_AUDIENCE) and redirects the browser here.
 // Users are matched by email; an unknown email gets an approved account with a random (unused) password.
-// Errors redirect to /?reason=... since this is a browser navigation, not an API call.
+// Errors redirect to /?reason=... since this is a browser navigation, not an API call. The Hub may send
+// the token as ?token= on a GET or as a `token` field in a POST body (form-encoded or JSON).
+// Vercel env vars often hold the PEM on one line with literal "\n" sequences; restore real newlines.
 const hubPublicKey = () => (process.env.HUB_SSO_PUBLIC_KEY || '').replace(/\\n/g, '\n');
-app.get('/api/sso/callback', wrap(async (req, res) => {
+const ssoCallback = wrap(async (req, res) => {
   const key = hubPublicKey(), audience = process.env.SSO_AUDIENCE;
-  if (!key.trim() || !audience) return res.redirect('/?reason=config');
+  if (!key.trim() || !audience) {
+    console.error(`SSO callback misconfigured: missing ${[!key.trim() && 'HUB_SSO_PUBLIC_KEY', !audience && 'SSO_AUDIENCE'].filter(Boolean).join(' and ')}`);
+    return res.redirect('/?reason=config');
+  }
   let claims;
   try {
-    claims = jwt.verify(String(req.query.token || ''), key, { algorithms: ['RS256'], audience });
-  } catch {
+    claims = jwt.verify(String(req.body?.token || req.query.token || ''), key, { algorithms: ['RS256'], audience });
+  } catch (e) {
+    console.error(`SSO token rejected: ${e.message}`);
     return res.redirect('/?reason=invalid');
   }
   // jwt.verify only checks expiry when `exp` is present, so a token without one is rejected here.
@@ -186,7 +192,9 @@ app.get('/api/sso/callback', wrap(async (req, res) => {
   await startSession(res, u.id, true);
   await audit({ user: u }, 'sso_login', 'user', u.id, em);
   res.redirect('/');
-}));
+});
+app.get('/api/sso/callback', ssoCallback);
+app.post('/api/sso/callback', express.urlencoded({ extended: false }), ssoCallback);
 app.get('/api/sso/me', wrap(async (req, res) => {
   const user = await sessionUser(sessionToken(req));
   if (!user?.sso) return bad(res, 'Unauthorized', 401);

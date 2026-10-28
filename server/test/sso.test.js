@@ -72,6 +72,17 @@ describe('GET /api/sso/callback', () => {
     expect((await auth(request(app).get('/api/me'), session)).body.sso).toBe(true);
   });
 
+  it('accepts the token in a POST body, form-encoded or JSON', async () => {
+    for (const send of [(r, token) => r.type('form').send({ token }), (r, token) => r.send({ token })]) {
+      const res = await send(request(app).post('/api/sso/callback'), hubToken());
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe('/');
+      expect((await auth(request(app).get('/api/sso/me'), tokenFromSetCookie(res))).status).toBe(200);
+    }
+    const bad = await request(app).post('/api/sso/callback').type('form').send({ token: 'not-a-jwt' });
+    expect(bad.headers.location).toBe('/?reason=invalid');
+  });
+
   it('maps the Hub admin role to admin for new users', async () => {
     const email = `admin-${Date.now()}@mccia.local`;
     await callback(hubToken({ email, role: 'admin' }));
