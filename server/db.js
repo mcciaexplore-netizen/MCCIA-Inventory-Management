@@ -142,6 +142,8 @@ CREATE TABLE IF NOT EXISTS vendors (
 );
 ALTER TABLE users ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+-- Marks sessions created through Hub SSO (/api/sso/callback) rather than a password login.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sso BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS login_failures (email TEXT NOT NULL, at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_login_failures ON login_failures(email, at);
 

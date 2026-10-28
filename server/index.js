@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import cors from 'cors';
 import { parse as parseCookie } from 'cookie';
 import { rateLimit } from 'express-rate-limit';
+import jwt from 'jsonwebtoken';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
 import {
@@ -107,11 +108,25 @@ const clearSessionCookie = (res) => res.clearCookie(SESSION_COOKIE, { path: '/' 
 const daysAgo = (n) => stamp(new Date(Date.now() - n * 864e5));
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, office: u.office, must_change_password: !!u.must_change_password });
 
+const sessionToken = (req) => parseCookie(req.headers.cookie || '')[SESSION_COOKIE] || '';
+// The signed-in user for a session token (with the session's `sso` flag), or undefined if it's missing/expired/unapproved.
+const sessionUser = async (token) => token && db.get(`SELECT u.id,u.name,u.email,u.role,u.office,u.must_change_password,s.sso FROM sessions s JOIN users u ON u.id=s.user_id
+  WHERE s.token=? AND s.created_at > ? AND u.approved`, [token, daysAgo(SESSION_DAYS)]);
+// Shared by password login and Hub SSO, so both produce identical sessions and cookies.
+async function startSession(res, userId, sso = false) {
+  await db.run('DELETE FROM sessions WHERE created_at < ?', [daysAgo(SESSION_DAYS)]);
+  const token = crypto.randomBytes(32).toString('hex');
+  await db.run('INSERT INTO sessions (token,user_id,created_at,sso) VALUES (?,?,?,?)', [token, userId, stamp(), sso]);
+  setSessionCookie(res, token);
+}
+const ssoEnforced = () => process.env.SSO_ENFORCE === 'true';
+
 const auth = wrap(async (req, res, next) => {
-  const token = parseCookie(req.headers.cookie || '')[SESSION_COOKIE] || '';
-  const user = token && await db.get(`SELECT u.id,u.name,u.email,u.role,u.office,u.must_change_password FROM sessions s JOIN users u ON u.id=s.user_id
-    WHERE s.token=? AND s.created_at > ? AND u.approved`, [token, daysAgo(SESSION_DAYS)]);
-  if (!user) return bad(res, 'Unauthorized', 401);
+  const token = sessionToken(req);
+  const user = await sessionUser(token);
+  // With SSO_ENFORCE on, an unauthenticated call tells the client to send the user to the Hub. The public
+  // routes (/api/login, /api/register, /api/offices, /api/sso/*) are registered before this middleware.
+  if (!user) return ssoEnforced() ? res.status(401).json({ error: 'Unauthorized', reason: 'sso_required' }) : bad(res, 'Unauthorized', 401);
   req.user = user; req.token = token;
   // Until the default/reset password is replaced, only the account endpoints work.
   if (user.must_change_password && !['/me', '/me/password', '/logout'].includes(req.path)) return bad(res, 'Change your password to continue', 403);
@@ -137,11 +152,52 @@ app.post('/api/login', wrap(async (req, res) => {
   }
   if (!u.approved) return bad(res, 'Your account is waiting for an admin to approve it', 403);
   await db.run('DELETE FROM login_failures WHERE email=? OR at < ?', [em, since]);
-  await db.run('DELETE FROM sessions WHERE created_at < ?', [daysAgo(SESSION_DAYS)]);
-  const token = crypto.randomBytes(32).toString('hex');
-  await db.run('INSERT INTO sessions (token,user_id,created_at) VALUES (?,?,?)', [token, u.id, stamp()]);
-  setSessionCookie(res, token);
+  await startSession(res, u.id);
   res.json({ user: publicUser(u) });
+}));
+
+// Hub SSO: the Hub signs an RS256 JWT for this app (aud = SSO_AUDIENCE) and redirects the browser here.
+// Users are matched by email; an unknown email gets an approved account with a random (unused) password.
+// Errors redirect to /?reason=... since this is a browser navigation, not an API call.
+const hubPublicKey = () => (process.env.HUB_SSO_PUBLIC_KEY || '').replace(/\\n/g, '\n');
+app.get('/api/sso/callback', wrap(async (req, res) => {
+  const key = hubPublicKey(), audience = process.env.SSO_AUDIENCE;
+  if (!key.trim() || !audience) return res.redirect('/?reason=config');
+  let claims;
+  try {
+    claims = jwt.verify(String(req.query.token || ''), key, { algorithms: ['RS256'], audience });
+  } catch {
+    return res.redirect('/?reason=invalid');
+  }
+  // jwt.verify only checks expiry when `exp` is present, so a token without one is rejected here.
+  const em = String(claims.email || '').trim().toLowerCase();
+  if (typeof claims.exp !== 'number' || !em) return res.redirect('/?reason=invalid');
+  let u = await db.get('SELECT * FROM users WHERE email=?', [em]);
+  if (!u) {
+    const name = String(claims.name || '').trim() || em;
+    const role = claims.role === 'admin' ? 'admin' : 'staff';
+    const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office,approved,must_change_password) VALUES (?,?,?,?,?,TRUE,FALSE)',
+      [name, em, hashPassword(crypto.randomBytes(32).toString('hex')), role, 'Head Office']);
+    u = await db.get('SELECT * FROM users WHERE id=?', [id]);
+    await audit({ user: u }, 'sso_create', 'user', id, `${em} (${role}, Head Office) via Hub SSO, sub ${claims.sub ?? '—'}`);
+  }
+  // An existing account an admin hasn't approved stays blocked; the session would be rejected by `auth` anyway.
+  if (!u.approved) return res.redirect('/?reason=pending');
+  await startSession(res, u.id, true);
+  await audit({ user: u }, 'sso_login', 'user', u.id, em);
+  res.redirect('/');
+}));
+app.get('/api/sso/me', wrap(async (req, res) => {
+  const user = await sessionUser(sessionToken(req));
+  if (!user?.sso) return bad(res, 'Unauthorized', 401);
+  res.json({ sso: true, ...publicUser(user) });
+}));
+app.get('/api/sso/logout', wrap(async (req, res) => {
+  const token = sessionToken(req);
+  if (token) await db.run('DELETE FROM sessions WHERE token=?', [token]);
+  clearSessionCookie(res);
+  const hub = (process.env.HUB_URL || '').replace(/\/+$/, '');
+  res.redirect(hub ? `${hub}/logout` : '/');
 }));
 
 // Self sign-up creates a pending staff account; an admin approves it under Users before it can sign in.
