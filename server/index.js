@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import cors from 'cors';
 import { parse as parseCookie } from 'cookie';
 import { rateLimit } from 'express-rate-limit';
-import jwt from 'jsonwebtoken';
+import { importSPKI, jwtVerify } from 'jose';
 import { fileURLToPath } from 'node:url';
 import { db, tx, hashPassword, verifyPassword, stamp, OFFICES } from './db.js';
 import {
@@ -156,41 +156,49 @@ app.post('/api/login', wrap(async (req, res) => {
   res.json({ user: publicUser(u) });
 }));
 
-// Hub SSO: the Hub signs an ES256 JWT for this app (aud = SSO_AUDIENCE) and redirects the browser here.
+// Hub SSO: the Hub (Mccia-APPHUB, src/lib/sso.ts) signs a 60-second EdDSA (Ed25519) JWT with
+// iss "mccia-app-hub" and aud = this app's SSO slug, then auto-POSTs it as a `token` form field to here.
 // Users are matched by email; an unknown email gets an approved account with a random (unused) password.
-// Errors redirect to /?reason=... since this is a browser navigation, not an API call. The Hub may send
-// the token as ?token= on a GET or as a `token` field in a POST body (form-encoded or JSON).
+// Errors redirect to /?reason=... since this is a browser navigation, not an API call.
 //
-// HUB_SSO_PUBLIC_KEY format for ES256: the Hub's P-256 (prime256v1) *public* key as SPKI PEM, e.g.
-//   -----BEGIN PUBLIC KEY-----
-//   MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE<...rest of base64, 124 chars in total...>
-//   -----END PUBLIC KEY-----
-// Every P-256 SPKI key's base64 starts with "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE". Not accepted: a JWK
-// ({"kty":"EC",...}), "-----BEGIN EC PRIVATE KEY-----" / "-----BEGIN PRIVATE KEY-----" (that's the Hub's
-// signing secret and must never be set here), or an RSA key. In Vercel the PEM can be pasted multi-line,
-// or on one line with literal "\n" sequences, which are turned back into real newlines below.
-const hubPublicKey = () => (process.env.HUB_SSO_PUBLIC_KEY || '').replace(/\\n/g, '\n');
+// HUB_SSO_PUBLIC_KEY is the Hub's sso-public.b64 as-is: the base64 of an SPKI PEM Ed25519 public key, on
+// one line (it starts "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0"). A plain PEM ("-----BEGIN PUBLIC KEY-----")
+// also works. Never set the Hub's private key (sso-private.b64) here.
+const SSO_ISSUER = 'mccia-app-hub';
+let hubKeyCache = null;
+async function hubPublicKey() {
+  const raw = (process.env.HUB_SSO_PUBLIC_KEY || '').trim();
+  if (!raw) return null;
+  if (hubKeyCache?.raw !== raw) {
+    const pem = raw.includes('-----BEGIN') ? raw.replace(/\\n/g, '\n') : Buffer.from(raw, 'base64').toString('utf8');
+    hubKeyCache = { raw, key: await importSPKI(pem, 'EdDSA') };
+  }
+  return hubKeyCache.key;
+}
 const ssoCallback = wrap(async (req, res) => {
-  const key = hubPublicKey(), audience = process.env.SSO_AUDIENCE;
-  if (!key.trim() || !audience) {
-    console.error(`SSO callback misconfigured: missing ${[!key.trim() && 'HUB_SSO_PUBLIC_KEY', !audience && 'SSO_AUDIENCE'].filter(Boolean).join(' and ')}`);
+  const audience = process.env.SSO_AUDIENCE;
+  let key;
+  try {
+    key = await hubPublicKey();
+  } catch (e) {
+    console.error(`SSO callback misconfigured: HUB_SSO_PUBLIC_KEY is not an Ed25519 public key (${e.message})`);
     return res.redirect('/?reason=config');
   }
-  const token = String(req.body?.token || req.query.token || '');
-  // Debug: a token prefix is only its header plus a few payload characters, and the key is public.
-  console.log('SSO token received:', token.substring(0, 50), `(${token.length} chars, ${req.method})`);
-  console.log('SSO public key starts:', process.env.HUB_SSO_PUBLIC_KEY?.substring(0, 50));
+  if (!key || !audience) {
+    console.error(`SSO callback misconfigured: missing ${[!key && 'HUB_SSO_PUBLIC_KEY', !audience && 'SSO_AUDIENCE'].filter(Boolean).join(' and ')}`);
+    return res.redirect('/?reason=config');
+  }
   let claims;
   try {
-    claims = jwt.verify(token, key, { algorithms: ['ES256'], audience });
+    ({ payload: claims } = await jwtVerify(String(req.body?.token || req.query.token || ''), key, {
+      algorithms: ['EdDSA'], audience, issuer: SSO_ISSUER, requiredClaims: ['exp'],
+    }));
   } catch (e) {
-    // The header's `alg` shows what the Hub really signed with when the error is "invalid algorithm".
-    console.error(`SSO token rejected: ${e.message} (token alg: ${jwt.decode(token, { complete: true })?.header?.alg ?? 'unreadable'})`);
+    console.error(`SSO token rejected: ${e.code || 'error'}: ${e.message}`);
     return res.redirect('/?reason=invalid');
   }
-  // jwt.verify only checks expiry when `exp` is present, so a token without one is rejected here.
   const em = String(claims.email || '').trim().toLowerCase();
-  if (typeof claims.exp !== 'number' || !em) return res.redirect('/?reason=invalid');
+  if (!em) return res.redirect('/?reason=invalid');
   let u = await db.get('SELECT * FROM users WHERE email=?', [em]);
   if (!u) {
     const name = String(claims.name || '').trim() || em;

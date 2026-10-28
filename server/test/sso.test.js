@@ -1,20 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import crypto from 'node:crypto';
-import jwt from 'jsonwebtoken';
+import { SignJWT } from 'jose';
 import request from 'supertest';
 import { app, auth, createUser, tokenFromSetCookie } from './helpers.js';
 import { db } from '../db.js';
 
-// A throwaway keypair stands in for the Hub's signing key.
-const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+// A throwaway Ed25519 keypair stands in for the Hub's signing key. The public key is set the way the Hub
+// hands it out (sso-public.b64): the base64 of the SPKI PEM, on one line.
+const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
 const PUBLIC_PEM = publicKey.export({ type: 'spki', format: 'pem' });
+const PUBLIC_B64 = Buffer.from(PUBLIC_PEM).toString('base64');
 const AUDIENCE = 'mccia-inventory';
 const ENV_KEYS = ['HUB_SSO_PUBLIC_KEY', 'SSO_AUDIENCE', 'HUB_URL', 'SSO_ENFORCE'];
 
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-  process.env.HUB_SSO_PUBLIC_KEY = PUBLIC_PEM;
+  process.env.HUB_SSO_PUBLIC_KEY = PUBLIC_B64;
   process.env.SSO_AUDIENCE = AUDIENCE;
   process.env.HUB_URL = 'https://hub.example';
   delete process.env.SSO_ENFORCE;
@@ -23,28 +25,39 @@ afterEach(() => {
   for (const k of ENV_KEYS) saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]);
 });
 
+// Signs a token the way the Hub does (src/lib/sso.ts in Mccia-APPHUB); options override one part to make it bad.
 let n = 0;
-const hubToken = (claims = {}, opts = {}) => jwt.sign(
-  { sub: `hub-${++n}`, email: `sso-${Date.now()}-${n}@mccia.local`, name: 'SSO User', role: 'member', ...claims },
-  privateKey, { algorithm: 'ES256', audience: AUDIENCE, expiresIn: '5m', ...opts },
-);
-const callback = (token) => request(app).get('/api/sso/callback').query({ token });
+const hubToken = (claims = {}, { key = privateKey, alg = 'EdDSA', aud = AUDIENCE, iss = 'mccia-app-hub', exp = '60s' } = {}) => {
+  const t = new SignJWT({ sub: `hub-${++n}`, email: `sso-${Date.now()}-${n}@mccia.local`, name: 'SSO User', role: 'user', ...claims })
+    .setProtectedHeader({ alg, typ: 'JWT', kid: 'hub-1' }).setIssuedAt().setAudience(aud).setIssuer(iss).setJti(crypto.randomUUID());
+  return (exp === null ? t : t.setExpirationTime(exp)).sign(key);
+};
+const callback = async (token) => request(app).get('/api/sso/callback').query({ token: await token });
 
 describe('GET /api/sso/callback', () => {
-  it('redirects with reason=config when the key or audience is missing', async () => {
+  it('redirects with reason=config when the key or audience is missing, or the key is not an Ed25519 public key', async () => {
     delete process.env.HUB_SSO_PUBLIC_KEY;
     const res = await callback(hubToken());
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe('/?reason=config');
+
+    process.env.HUB_SSO_PUBLIC_KEY = Buffer.from('not a key').toString('base64');
+    expect((await callback(hubToken())).headers.location).toBe('/?reason=config');
   });
 
-  it('rejects a bad signature, wrong audience, expired or exp-less token', async () => {
-    const other = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey;
+  it('accepts the public key as a plain PEM too', async () => {
+    process.env.HUB_SSO_PUBLIC_KEY = PUBLIC_PEM;
+    expect((await callback(hubToken())).headers.location).toBe('/');
+  });
+
+  it('rejects a bad signature, wrong algorithm, audience or issuer, expired or exp-less token', async () => {
     const bad = [
-      jwt.sign({ email: 'x@mccia.local' }, other, { algorithm: 'ES256', audience: AUDIENCE, expiresIn: '5m' }),
-      hubToken({}, { audience: 'some-other-app' }),
-      jwt.sign({ email: 'x@mccia.local', exp: Math.floor(Date.now() / 1000) - 60 }, privateKey, { algorithm: 'ES256', audience: AUDIENCE }),
-      jwt.sign({ email: 'x@mccia.local' }, privateKey, { algorithm: 'ES256', audience: AUDIENCE }),
+      hubToken({}, { key: crypto.generateKeyPairSync('ed25519').privateKey }),
+      hubToken({}, { key: crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey, alg: 'ES256' }),
+      hubToken({}, { aud: 'some-other-app' }),
+      hubToken({}, { iss: 'someone-else' }),
+      hubToken({}, { exp: Math.floor(Date.now() / 1000) - 60 }),
+      hubToken({}, { exp: null }),
       'not-a-jwt',
     ];
     for (const t of bad) {
@@ -74,7 +87,7 @@ describe('GET /api/sso/callback', () => {
 
   it('accepts the token in a POST body, form-encoded or JSON', async () => {
     for (const send of [(r, token) => r.type('form').send({ token }), (r, token) => r.send({ token })]) {
-      const res = await send(request(app).post('/api/sso/callback'), hubToken());
+      const res = await send(request(app).post('/api/sso/callback'), await hubToken());
       expect(res.status).toBe(302);
       expect(res.headers.location).toBe('/');
       expect((await auth(request(app).get('/api/sso/me'), tokenFromSetCookie(res))).status).toBe(200);
