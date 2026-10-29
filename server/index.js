@@ -201,13 +201,17 @@ const ssoCallback = wrap(async (req, res) => {
     console.error(`SSO callback misconfigured: missing ${[!key && 'HUB_SSO_PUBLIC_KEY', !audience && 'SSO_AUDIENCE'].filter(Boolean).join(' and ')}`);
     return refuse('config');
   }
+  const token = String(req.body?.token || req.query.token || '');
   let claims;
   try {
-    ({ payload: claims } = await jwtVerify(String(req.body?.token || req.query.token || ''), key, {
+    ({ payload: claims } = await jwtVerify(token, key, {
       algorithms: ['EdDSA'], audience, issuer: SSO_ISSUER, requiredClaims: ['exp'],
     }));
   } catch (e) {
-    console.error(`SSO token rejected: ${e.code || 'error'}: ${e.message}`);
+    // The shape of what arrived, never the token itself, so a real click can be told apart from a malformed or missing token.
+    const from = req.body?.token ? 'body' : req.query.token ? 'query' : 'nowhere';
+    console.error(`SSO token rejected: ${e.code || 'error'}: ${e.message} (${req.method}, from ${from}, ${token.length} chars, `
+      + `${token ? token.split('.').length : 0} parts, ${req.headers['content-type'] || 'no content-type'}, ${req.headers['user-agent'] ? 'browser/agent ' + String(req.headers['user-agent']).slice(0, 40) : 'no user-agent'})`);
     return refuse('invalid');
   }
   const em = String(claims.email || '').trim().toLowerCase();
