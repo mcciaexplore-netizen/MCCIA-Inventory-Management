@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import crypto from 'node:crypto';
 import { SignJWT } from 'jose';
 import request from 'supertest';
-import { app, auth, createUser, tokenFromSetCookie } from './helpers.js';
+import { app, auth, createUser, loginAs, tokenFromSetCookie } from './helpers.js';
 import { db } from '../db.js';
 
 // A throwaway Ed25519 keypair stands in for the Hub's signing key. The public key is set the way the Hub
@@ -138,6 +138,29 @@ describe('GET /api/sso/callback', () => {
     const res = await callback(hubToken({ email }));
     expect(res.headers.location).toBe('/?reason=pending');
     expect(tokenFromSetCookie(res)).toBeNull();
+  });
+
+  it('signs out whoever was signed in on this browser and signs in the Hub user instead', async () => {
+    const other = await loginAs();
+    const hubEmail = `takeover-${Date.now()}@mccia.local`;
+    const res = await auth(request(app).get('/api/sso/callback').query({ token: await hubToken({ email: hubEmail }) }), other.token);
+    expect(res.headers.location).toBe('/');
+    const fresh = tokenFromSetCookie(res);
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe(other.token);
+    expect((await auth(request(app).get('/api/me'), fresh)).body.email).toBe(hubEmail);
+    expect((await auth(request(app).get('/api/me'), other.token)).status).toBe(401);
+  });
+
+  it('signs out whoever was signed in even when the Hub sign-in is refused', async () => {
+    for (const [token, reason] of [['not-a-jwt', 'invalid'], [null, 'config']]) {
+      const other = await loginAs();
+      if (reason === 'config') delete process.env.HUB_SSO_PUBLIC_KEY;
+      const res = await auth(request(app).get('/api/sso/callback').query({ token: token ?? await hubToken() }), other.token);
+      expect(res.headers.location).toBe(`/?reason=${reason}`);
+      expect(tokenFromSetCookie(res)).toBe('');
+      expect((await auth(request(app).get('/api/me'), other.token)).status).toBe(401);
+    }
   });
 });
 

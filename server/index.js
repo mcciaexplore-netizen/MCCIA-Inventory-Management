@@ -184,17 +184,22 @@ function ssoRoleFor(email) {
   return { role, configured: superAdmins.length + admins.length > 0 };
 }
 const ssoCallback = wrap(async (req, res) => {
+  // Whoever was signed in on this browser is signed out first, so a Hub sign-in always takes over: on success the
+  // new session replaces it, and on any refusal below the person lands on the login page, not in the old account.
+  const previous = sessionToken(req);
+  if (previous) await db.run('DELETE FROM sessions WHERE token=?', [previous]);
+  const refuse = (reason) => { if (previous) clearSessionCookie(res); return res.redirect(`/?reason=${reason}`); };
   const audience = process.env.SSO_AUDIENCE;
   let key;
   try {
     key = await hubPublicKey();
   } catch (e) {
     console.error(`SSO callback misconfigured: HUB_SSO_PUBLIC_KEY is not an Ed25519 public key (${e.message})`);
-    return res.redirect('/?reason=config');
+    return refuse('config');
   }
   if (!key || !audience) {
     console.error(`SSO callback misconfigured: missing ${[!key && 'HUB_SSO_PUBLIC_KEY', !audience && 'SSO_AUDIENCE'].filter(Boolean).join(' and ')}`);
-    return res.redirect('/?reason=config');
+    return refuse('config');
   }
   let claims;
   try {
@@ -203,10 +208,10 @@ const ssoCallback = wrap(async (req, res) => {
     }));
   } catch (e) {
     console.error(`SSO token rejected: ${e.code || 'error'}: ${e.message}`);
-    return res.redirect('/?reason=invalid');
+    return refuse('invalid');
   }
   const em = String(claims.email || '').trim().toLowerCase();
-  if (!em) return res.redirect('/?reason=invalid');
+  if (!em) return refuse('invalid');
   const { role, configured: rolesConfigured } = ssoRoleFor(em);
   let u = await db.get('SELECT * FROM users WHERE email=?', [em]);
   if (!u) {
@@ -217,7 +222,7 @@ const ssoCallback = wrap(async (req, res) => {
     await audit({ user: u }, 'sso_create', 'user', id, `${em} (${role}, Head Office) via Hub SSO, sub ${claims.sub ?? '—'}`);
   }
   // An existing account an admin hasn't approved stays blocked; the session would be rejected by `auth` anyway.
-  if (!u.approved) return res.redirect('/?reason=pending');
+  if (!u.approved) return refuse('pending');
   // The env lists are the source of truth for SSO users' roles, overriding changes made under Users. With both
   // lists empty (not configured yet), existing roles are left alone rather than demoting every admin to staff.
   if (rolesConfigured && u.role !== role) {
