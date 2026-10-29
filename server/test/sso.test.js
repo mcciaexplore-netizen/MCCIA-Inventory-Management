@@ -11,7 +11,7 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
 const PUBLIC_PEM = publicKey.export({ type: 'spki', format: 'pem' });
 const PUBLIC_B64 = Buffer.from(PUBLIC_PEM).toString('base64');
 const AUDIENCE = 'mccia-inventory';
-const ENV_KEYS = ['HUB_SSO_PUBLIC_KEY', 'SSO_AUDIENCE', 'HUB_URL', 'SSO_ENFORCE'];
+const ENV_KEYS = ['HUB_SSO_PUBLIC_KEY', 'SSO_AUDIENCE', 'HUB_URL', 'SSO_ENFORCE', 'SUPER_ADMIN_EMAILS', 'ADMIN_EMAILS'];
 
 let saved;
 beforeEach(() => {
@@ -20,6 +20,8 @@ beforeEach(() => {
   process.env.SSO_AUDIENCE = AUDIENCE;
   process.env.HUB_URL = 'https://hub.example';
   delete process.env.SSO_ENFORCE;
+  delete process.env.SUPER_ADMIN_EMAILS;
+  delete process.env.ADMIN_EMAILS;
 });
 afterEach(() => {
   for (const k of ENV_KEYS) saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]);
@@ -96,13 +98,34 @@ describe('GET /api/sso/callback', () => {
     expect(bad.headers.location).toBe('/?reason=invalid');
   });
 
-  it('maps the Hub admin role to admin for new users', async () => {
-    const email = `admin-${Date.now()}@mccia.local`;
-    await callback(hubToken({ email, role: 'admin' }));
-    expect((await db.get('SELECT role FROM users WHERE email=?', [email])).role).toBe('admin');
+  it('gives new users their role from SUPER_ADMIN_EMAILS / ADMIN_EMAILS, ignoring the token role', async () => {
+    const t = Date.now(), sup = `super-${t}@mccia.local`, adm = `adm-${t}@mccia.local`, plain = `plain-${t}@mccia.local`;
+    process.env.SUPER_ADMIN_EMAILS = `someone@mccia.local, ${sup.toUpperCase()}`;
+    process.env.ADMIN_EMAILS = ` ${adm} ,`;
+    for (const email of [sup, adm, plain]) await callback(hubToken({ email, role: 'admin' }));
+    const role = async (email) => (await db.get('SELECT role FROM users WHERE email=?', [email])).role;
+    expect([await role(sup), await role(adm), await role(plain)]).toEqual(['admin', 'employee', 'staff']);
   });
 
-  it('signs in an existing user by email without changing their role or office', async () => {
+  it('re-applies the env role to an existing user on every SSO sign-in', async () => {
+    const existing = await createUser({ role: 'admin' });
+    process.env.ADMIN_EMAILS = existing.email;
+    let me = await auth(request(app).get('/api/me'), tokenFromSetCookie(await callback(hubToken({ email: existing.email }))));
+    expect(me.body.role).toBe('employee');
+
+    process.env.ADMIN_EMAILS = 'someone-else@mccia.local';
+    me = await auth(request(app).get('/api/me'), tokenFromSetCookie(await callback(hubToken({ email: existing.email }))));
+    expect(me.body.role).toBe('staff');
+    expect(await db.get("SELECT 1 FROM audit_log WHERE action='role_change' AND entity_id=? AND detail LIKE '%employee → staff%'", [existing.id])).toBeTruthy();
+  });
+
+  it('gives new users staff when neither list is set', async () => {
+    const email = `nolists-${Date.now()}@mccia.local`;
+    await callback(hubToken({ email, role: 'admin' }));
+    expect((await db.get('SELECT role FROM users WHERE email=?', [email])).role).toBe('staff');
+  });
+
+  it('signs in an existing user by email, keeping their role and office while neither list is set', async () => {
     const existing = await createUser({ role: 'employee', office: 'Bhosari' });
     const res = await callback(hubToken({ email: existing.email.toUpperCase(), role: 'admin' }));
     const me = await auth(request(app).get('/api/sso/me'), tokenFromSetCookie(res));

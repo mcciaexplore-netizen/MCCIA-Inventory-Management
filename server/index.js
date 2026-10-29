@@ -175,6 +175,14 @@ async function hubPublicKey() {
   }
   return hubKeyCache.key;
 }
+// SSO roles come from env lists, by email: SUPER_ADMIN_EMAILS → admin, ADMIN_EMAILS → employee (shown as
+// "Staff", full inventory access), anyone else → staff (shown as "Employee", requests only).
+const emailList = (v) => (v || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+function ssoRoleFor(email) {
+  const superAdmins = emailList(process.env.SUPER_ADMIN_EMAILS), admins = emailList(process.env.ADMIN_EMAILS);
+  const role = superAdmins.includes(email) ? 'admin' : admins.includes(email) ? 'employee' : 'staff';
+  return { role, configured: superAdmins.length + admins.length > 0 };
+}
 const ssoCallback = wrap(async (req, res) => {
   const audience = process.env.SSO_AUDIENCE;
   let key;
@@ -199,10 +207,10 @@ const ssoCallback = wrap(async (req, res) => {
   }
   const em = String(claims.email || '').trim().toLowerCase();
   if (!em) return res.redirect('/?reason=invalid');
+  const { role, configured: rolesConfigured } = ssoRoleFor(em);
   let u = await db.get('SELECT * FROM users WHERE email=?', [em]);
   if (!u) {
     const name = String(claims.name || '').trim() || em;
-    const role = claims.role === 'admin' ? 'admin' : 'staff';
     const id = await db.insert('INSERT INTO users (name,email,password_hash,role,office,approved,must_change_password) VALUES (?,?,?,?,?,TRUE,FALSE)',
       [name, em, hashPassword(crypto.randomBytes(32).toString('hex')), role, 'Head Office']);
     u = await db.get('SELECT * FROM users WHERE id=?', [id]);
@@ -210,6 +218,12 @@ const ssoCallback = wrap(async (req, res) => {
   }
   // An existing account an admin hasn't approved stays blocked; the session would be rejected by `auth` anyway.
   if (!u.approved) return res.redirect('/?reason=pending');
+  // The env lists are the source of truth for SSO users' roles, overriding changes made under Users. With both
+  // lists empty (not configured yet), existing roles are left alone rather than demoting every admin to staff.
+  if (rolesConfigured && u.role !== role) {
+    await db.run('UPDATE users SET role=? WHERE id=?', [role, u.id]);
+    await audit({ user: u }, 'role_change', 'user', u.id, `${em}: ${u.role} → ${role} (Hub SSO, from SUPER_ADMIN_EMAILS/ADMIN_EMAILS)`);
+  }
   await startSession(res, u.id, true);
   await audit({ user: u }, 'sso_login', 'user', u.id, em);
   res.redirect('/');
