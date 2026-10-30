@@ -37,6 +37,9 @@ p { color: var(--muted); margin: 0; }
 .nav a.active { background: var(--blue-tint); color: var(--primary); font-weight: 600; }
 .nav a svg { width: 18px; height: 18px; }
 .sidebar .spacer { flex: 1; }
+/* "‹ App Hub" above the logo (Hub SSO sessions only): small and muted, teal on hover, like the Hub's own back link. */
+.hub-back { display: inline-flex; align-items: center; gap: 0.25rem; align-self: flex-start; padding: 0 0.5rem 0.75rem; font-size: 0.75rem; color: var(--muted); text-decoration: none; transition: color var(--ease-sm); }
+.hub-back:hover { color: #2a6b7c; }
 .user-box { padding: 0.8rem; border-radius: var(--r-md); background: var(--bg-alt); font-size: 0.85rem; margin-bottom: 0.5rem; }
 .main { padding: 2.5rem; max-width: 1140px; width: 100%; margin: 0 auto; position: relative; min-width: 0; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }

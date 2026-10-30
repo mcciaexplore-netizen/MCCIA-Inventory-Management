@@ -164,6 +164,25 @@ describe('GET /api/sso/callback', () => {
   });
 });
 
+describe('hub_url', () => {
+  it('keeps the token\'s hub_url for the session and returns it from /api/me and /api/sso/me', async () => {
+    const session = tokenFromSetCookie(await callback(hubToken({ hub_url: 'https://hub.example/' })));
+    for (const path of ['/api/me', '/api/sso/me']) {
+      const res = await request(app).get(path).set('Cookie', `session=${session}`);
+      expect(res.body.hub_url).toBe('https://hub.example');
+    }
+  });
+
+  it('is null without the claim, for anything but an http(s) address, and for a password login', async () => {
+    for (const claims of [{}, { hub_url: 'javascript:alert(1)' }, { hub_url: 'not a url' }]) {
+      const session = tokenFromSetCookie(await callback(hubToken(claims)));
+      expect((await request(app).get('/api/me').set('Cookie', `session=${session}`)).body.hub_url).toBeNull();
+    }
+    const { token } = await loginAs({ role: 'staff' });
+    expect((await auth(request(app).get('/api/me'), token)).body.hub_url).toBeNull();
+  });
+});
+
 describe('GET /api/sso/me', () => {
   it('returns 401 for a password-login session', async () => {
     const u = await createUser();

@@ -107,16 +107,18 @@ const setSessionCookie = (res, token) => res.cookie(SESSION_COOKIE, token, {
 const clearSessionCookie = (res) => res.clearCookie(SESSION_COOKIE, { path: '/' });
 const daysAgo = (n) => stamp(new Date(Date.now() - n * 864e5));
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, office: u.office, must_change_password: !!u.must_change_password });
+// The Hub's address from the session (Hub SSO only), or null: the client shows "‹ App Hub" only when it is set.
+const hubLink = (u) => ({ hub_url: u.hub_url || null });
 
 const sessionToken = (req) => parseCookie(req.headers.cookie || '')[SESSION_COOKIE] || '';
-// The signed-in user for a session token (with the session's `sso` flag), or undefined if it's missing/expired/unapproved.
-const sessionUser = async (token) => token && db.get(`SELECT u.id,u.name,u.email,u.role,u.office,u.must_change_password,s.sso FROM sessions s JOIN users u ON u.id=s.user_id
+// The signed-in user for a session token (with the session's `sso` flag and `hub_url`), or undefined if it's missing/expired/unapproved.
+const sessionUser = async (token) => token && db.get(`SELECT u.id,u.name,u.email,u.role,u.office,u.must_change_password,s.sso,s.hub_url FROM sessions s JOIN users u ON u.id=s.user_id
   WHERE s.token=? AND s.created_at > ? AND u.approved`, [token, daysAgo(SESSION_DAYS)]);
 // Shared by password login and Hub SSO, so both produce identical sessions and cookies.
-async function startSession(res, userId, sso = false) {
+async function startSession(res, userId, sso = false, hubUrl = null) {
   await db.run('DELETE FROM sessions WHERE created_at < ?', [daysAgo(SESSION_DAYS)]);
   const token = crypto.randomBytes(32).toString('hex');
-  await db.run('INSERT INTO sessions (token,user_id,created_at,sso) VALUES (?,?,?,?)', [token, userId, stamp(), sso]);
+  await db.run('INSERT INTO sessions (token,user_id,created_at,sso,hub_url) VALUES (?,?,?,?,?)', [token, userId, stamp(), sso, hubUrl]);
   setSessionCookie(res, token);
 }
 const ssoEnforced = () => process.env.SSO_ENFORCE === 'true';
@@ -183,6 +185,15 @@ function ssoRoleFor(email) {
   const role = superAdmins.includes(email) ? 'admin' : admins.includes(email) ? 'employee' : 'staff';
   return { role, configured: superAdmins.length + admins.length > 0 };
 }
+// The token's hub_url, if it is an http(s) address: it becomes a link in the sidebar, so nothing else (javascript:, ...) is kept.
+function hubUrlFrom(claims) {
+  try {
+    const u = new URL(String(claims.hub_url || ''));
+    return ['https:', 'http:'].includes(u.protocol) ? u.href.replace(/\/+$/, '') : null;
+  } catch {
+    return null;
+  }
+}
 const ssoCallback = wrap(async (req, res) => {
   // Whoever was signed in on this browser is signed out first, so a Hub sign-in always takes over: on success the
   // new session replaces it, and on any refusal below the person lands on the login page, not in the old account.
@@ -233,7 +244,7 @@ const ssoCallback = wrap(async (req, res) => {
     await db.run('UPDATE users SET role=? WHERE id=?', [role, u.id]);
     await audit({ user: u }, 'role_change', 'user', u.id, `${em}: ${u.role} → ${role} (Hub SSO, from SUPER_ADMIN_EMAILS/ADMIN_EMAILS)`);
   }
-  await startSession(res, u.id, true);
+  await startSession(res, u.id, true, hubUrlFrom(claims));
   await audit({ user: u }, 'sso_login', 'user', u.id, em);
   res.redirect('/');
 });
@@ -242,7 +253,7 @@ app.post('/api/sso/callback', express.urlencoded({ extended: false }), ssoCallba
 app.get('/api/sso/me', wrap(async (req, res) => {
   const user = await sessionUser(sessionToken(req));
   if (!user?.sso) return bad(res, 'Unauthorized', 401);
-  res.json({ sso: true, ...publicUser(user) });
+  res.json({ sso: true, ...publicUser(user), ...hubLink(user) });
 }));
 app.get('/api/sso/logout', wrap(async (req, res) => {
   const token = sessionToken(req);
@@ -267,7 +278,7 @@ app.post('/api/register', registerLimiter, wrap(async (req, res) => {
 
 app.use('/api', auth);
 // `sso` tells the client this session came from Hub SSO, so sign-out goes through /api/sso/logout.
-app.get('/api/me', (req, res) => res.json({ ...publicUser(req.user), sso: !!req.user.sso }));
+app.get('/api/me', (req, res) => res.json({ ...publicUser(req.user), sso: !!req.user.sso, ...hubLink(req.user) }));
 app.post('/api/logout', wrap(async (req, res) => { await db.run('DELETE FROM sessions WHERE token=?', [req.token]); clearSessionCookie(res); res.json({ ok: true }); }));
 app.post('/api/me/password', passwordChangeLimiter, wrap(async (req, res) => {
   const { current_password = '', new_password = '' } = req.body;

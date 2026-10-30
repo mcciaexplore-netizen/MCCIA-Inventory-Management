@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { FileText, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, Truck, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
+import { ChevronLeft, FileText, HandHelping, History, LayoutDashboard, LogOut, Menu, Package, PackagePlus, Truck, UserCog, Users as UsersIcon, Wrench, X } from 'lucide-react';
 import { api } from './api.js';
 import { roleLabel } from './roles.js';
 const PurchaseOrders = lazy(() => import('./pages/PurchaseOrders.jsx'));
@@ -72,6 +72,7 @@ export default function App() {
       </div>
       <div className={`drawer-backdrop ${open ? 'open' : ''}`} onClick={() => setOpen(false)} />
       <aside className={`sidebar ${open ? 'open' : ''}`}>
+        {user.hub_url && <a href={user.hub_url} className="hub-back"><ChevronLeft size={14} /> App Hub</a>}
         <div className="brand"><img src="/logo.png" alt="MCCIA" className="logo" style={{ height: 44 }} /></div>
         <nav className="nav">
           <NavLink to="/" end><LayoutDashboard /> Dashboard</NavLink>

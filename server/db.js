@@ -144,6 +144,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT TRU
 ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
 -- Marks sessions created through Hub SSO (/api/sso/callback) rather than a password login.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sso BOOLEAN NOT NULL DEFAULT FALSE;
+-- Where the Hub lives, from the SSO token's hub_url claim, for the sidebar's "‹ App Hub" link. NULL for password logins.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hub_url TEXT;
 CREATE TABLE IF NOT EXISTS login_failures (email TEXT NOT NULL, at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_login_failures ON login_failures(email, at);
 
